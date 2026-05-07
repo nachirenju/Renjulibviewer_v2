@@ -1,0 +1,50 @@
+[package]
+name = "Renjulibviewer_v2"
+version = "0.1.0"
+edition = "2024"
+description = "A high-performance Renju library and database viewer with modern GUI."
+license = "GPL-3.0"
+repository = "https://github.com/nachirenju/Renjulibviewer_v2.git"
+readme = "README.md"
+keywords = ["renju", "gomoku", "viewer", "egui"]
+categories = ["games", "gui"]
+
+[dependencies]
+# --- 全プラットフォーム共通の依存関係 ---
+eframe = "0.30"
+encoding_rs = "0.8"
+lz4_flex = "0.11"
+byteorder = "1.5"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.24"
+rustc-hash = "2.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rand = "0.8"
+web-time = "1.1"
+memmap2 = "0.9"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rand = "0.8"
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen-futures = "0.4"
+web-time = "1.1"
+log = "0.4"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "Storage"] }
+
+# --- Windows専用 ---
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.52"
+
+# --- ビルドスクリプト用（Windowsのアイコン設定用） ---
+[build-dependencies]
+winres = "0.1"
+
+[profile.release]
+opt-level = 3        
+lto = true           
+codegen-units = 1    
+panic = "abort"      
