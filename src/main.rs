@@ -45,13 +45,31 @@ pub fn setup_custom_fonts(ctx: &egui::Context, _path: &str) {
 
     #[cfg(target_arch = "wasm32")]
     {
-        let font_data = include_bytes!("../Renjulibviewer_JP.ttf");
-        fonts.font_data.insert(
-            "custom_font".to_owned(),
-            Arc::new(egui::FontData::from_static(font_data)),
-        );
-        fonts.families.entry(egui::FontFamily::Proportional).or_default().insert(0, "custom_font".to_owned());
-        fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "custom_font".to_owned());
+        // 各フォントデータの読み込み
+        let font_jp = include_bytes!("../Renjulibviewer_JP.ttf");
+        let font_sc = include_bytes!("../Renjulibviewer_SC.ttf");
+        let font_tc = include_bytes!("../Renjulibviewer_TC.ttf");
+        let font_kr = include_bytes!("../Renjulibviewer_KR.ttf");
+
+        fonts.font_data.insert("font_jp".to_owned(), Arc::new(egui::FontData::from_static(font_jp)));
+        fonts.font_data.insert("font_sc".to_owned(), Arc::new(egui::FontData::from_static(font_sc)));
+        fonts.font_data.insert("font_tc".to_owned(), Arc::new(egui::FontData::from_static(font_tc)));
+        fonts.font_data.insert("font_kr".to_owned(), Arc::new(egui::FontData::from_static(font_kr)));
+
+        // 優先順位の設定: JP -> SC -> TC -> KR
+        let families = [
+            egui::FontFamily::Proportional,
+            egui::FontFamily::Monospace,
+        ];
+
+        for family in families {
+            let vec = fonts.families.entry(family).or_default();
+            vec.insert(0, "font_jp".to_owned());
+            vec.push("font_sc".to_owned());
+            vec.push("font_tc".to_owned());
+            vec.push("font_kr".to_owned());
+        }
+        
         ctx.set_fonts(fonts);
     }
 }

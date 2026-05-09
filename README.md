@@ -82,8 +82,8 @@ trunk serve
 詳細は [LICENSE](LICENSE) ファイルをご参照ください。
 
 ### フォント
-**[Noto Sans JP](https://fonts.google.com/specimen/Noto+Sans+JP)**  
-Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.  
-Licensed under the [SIL Open Font License, Version 1.1](http://scripts.sil.org/OFL).
+- **[Noto Sans CJK (Japanese / Simplified Chinese / Traditional Chinese / Korean)](https://fonts.google.com/noto)**  
+  Licensed under the [SIL Open Font License, Version 1.1](http://scripts.sil.org/OFL).
+  Subsetted files provided by [taka4sato/NotoSans-SubsetFont](https://github.com/taka4sato/NotoSans-SubsetFont).
 
 Developed by **nachirenju**
