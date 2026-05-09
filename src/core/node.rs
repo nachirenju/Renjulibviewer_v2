@@ -97,34 +97,26 @@ impl TextPool {
     }
 }
 
-/// 32バイトに極限圧縮された局面ノード
+/// 24バイトに極限圧縮された局面ノード (Hot Data分離版)
 #[derive(Debug, Clone)]
 pub struct RenLibNode {
     pub hash: u64,          // 8 bytes
     pub parent: u32,        // 4 bytes
     pub child: u32,         // 4 bytes
     pub sibling: u32,       // 4 bytes
-    pub hash_next: u32,     // 4 bytes
-    
-    // comment_id (16 bit) + text_id (16 bit)
-    texts: u32,             // 4 bytes
     // x (8 bit) + y (8 bit) + depth (8 bit) + 予約領域 (8 bit)
-    move_info: u32,         // 4 bytes
-} // Total: 32 bytes!
+    pub move_info: u32,     // 4 bytes
+} // Total: 24 bytes!
 
 impl RenLibNode {
     #[inline(always)]
-    pub fn new(x: i8, y: i8, comment_id: u32, text_id: u32, parent: u32, child: u32, sibling: u32, hash_next: u32, hash: u64, depth: u8) -> Self {
-        let cid = std::cmp::min(comment_id, 0xFFFF);
-        let tid = std::cmp::min(text_id, 0xFFFF);
-        let texts = cid | (tid << 16);
-        
+    pub fn new(x: i8, y: i8, parent: u32, child: u32, sibling: u32, hash: u64, depth: u8) -> Self {
         let ux = x as u8 as u32;
         let uy = y as u8 as u32;
         let ud = depth as u32;
         let move_info = ux | (uy << 8) | (ud << 16);
         
-        Self { hash, parent, child, sibling, hash_next, texts, move_info }
+        Self { hash, parent, child, sibling, move_info }
     }
 
     #[inline(always)] pub fn x(&self) -> i8 { (self.move_info & 0xFF) as i8 }
@@ -146,35 +138,4 @@ impl RenLibNode {
         self.move_info = (self.move_info & 0xFF00FFFF) | ((depth as u32) << 16);
     }
 
-    #[inline(always)]
-    pub fn comment_id(&self) -> u32 {
-        let id = self.texts & 0xFFFF;
-        if id == 0xFFFF { NO_TEXT } else { id }
-    }
-    
-    #[inline(always)]
-    pub fn set_comment_id(&mut self, id: u32) {
-        let cid = std::cmp::min(id, 0xFFFF);
-        self.texts = (self.texts & 0xFFFF0000) | cid;
-    }
-
-    #[inline(always)]
-    pub fn text_id(&self) -> u32 {
-        let id = (self.texts >> 16) & 0xFFFF;
-        if id == 0xFFFF { NO_TEXT } else { id }
-    }
-    
-    #[inline(always)]
-    pub fn set_text_id(&mut self, id: u32) {
-        let tid = std::cmp::min(id, 0xFFFF);
-        self.texts = (self.texts & 0x0000FFFF) | (tid << 16);
-    }
-
-    pub fn decode_comment(&self, pool: &TextPool, enc: &'static encoding_rs::Encoding) -> Option<String> {
-        pool.get(self.comment_id()).map(|b| enc.decode(b).0.into_owned())
-    }
-
-    pub fn decode_text(&self, pool: &TextPool, enc: &'static encoding_rs::Encoding) -> Option<String> {
-        pool.get(self.text_id()).map(|b| enc.decode(b).0.into_owned())
-    }
 }

@@ -1,6 +1,6 @@
 use eframe::egui;
 use crate::lang;
-use crate::core::{NO_TEXT, NO_NODE};
+use crate::core::NO_TEXT;
 use crate::exportkifu::*;
 
 pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, tr: &lang::Tr, ctx: &egui::Context) {
@@ -10,13 +10,8 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
             ui.heading(tr.comment);
             let current_idx = app.get_current_node();
             let mut comment_text = String::new();
-            if let Some(nodes) = &app.lib_nodes {
-                if let Some(idx) = current_idx {
-                    if let Some(pool) = &app.text_pool {
-                        let encoding = app.settings.text_encoding.to_encoding_rs();
-                        if let Some(c) = nodes[idx].decode_comment(pool, encoding) { comment_text = c; }
-                    }
-                }
+            if let Some(idx) = current_idx {
+                if let Some(c) = app.decode_comment(idx) { comment_text = c; }
             }
             
             let response = ui.add_sized([ui.available_width(), 150.0], egui::TextEdit::multiline(&mut comment_text));
@@ -33,15 +28,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let current_hash = nodes[idx].hash;
                         if let Some(ht) = &app.hash_table {
                             if let Some(&head) = ht.get(&current_hash) {
-                                let mut curr = head;
-                                while curr != NO_NODE {
-                                    let i = curr as usize;
-                                    nodes[i].set_comment_id(new_comment_id);
-                                    curr = nodes[i].hash_next;
-                                }
+                                app.set_comment_id(head as usize, new_comment_id);
                             }
                         }
-                        nodes[idx].set_comment_id(new_comment_id);
+                        app.set_comment_id(idx, new_comment_id);
                     }
                     app.subtree_cache.borrow_mut().clear();
                 }

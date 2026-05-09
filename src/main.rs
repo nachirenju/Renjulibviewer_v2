@@ -184,6 +184,7 @@ pub struct RenjuApp {
     pub board: Board,
     pub lib_nodes: Option<Vec<RenLibNode>>,
     pub hash_table: Option<FxHashMap<u64, u32>>, 
+    pub node_texts: Option<Vec<u32>>, // FxHashMap から Vec に変更
     pub text_pool: Option<TextPool>, 
     pub current_node_idx: Option<usize>,
     pub is_db_mode: bool,
@@ -213,7 +214,7 @@ pub struct RenjuApp {
 
 impl RenjuApp {
     fn new_with_settings(settings: setting::Settings) -> Self {
-        let root_node = RenLibNode::new(-1, -1, NO_TEXT, NO_TEXT, NO_NODE, NO_NODE, NO_NODE, NO_NODE, 0, 0);
+        let root_node = RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0);
         let mut hash_table = FxHashMap::default();
         hash_table.insert(0, 0);
 
@@ -221,6 +222,7 @@ impl RenjuApp {
             board: Board::new(),
             lib_nodes: Some(vec![root_node]),
             hash_table: Some(hash_table),
+            node_texts: Some(Vec::new()), // default から Vec::new() に変更
             text_pool: Some(TextPool::new()), 
             current_node_idx: Some(0),
             is_db_mode: false,
@@ -248,6 +250,7 @@ impl RenjuApp {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn process_loaded_data(&mut self, data: &[u8], file_name: String, is_db: bool) {
         let start_time = web_time::Instant::now();
         let encoding = self.settings.text_encoding.to_encoding_rs();
@@ -262,6 +265,58 @@ impl RenjuApp {
             self.current_file = Some(file_name);
             self.lib_nodes = Some(parser.nodes);
             self.hash_table = Some(parser.hash_table);
+            self.node_texts = Some(parser.node_texts);
+            self.text_pool = Some(parser.text_pool); 
+            self.subtree_cache.borrow_mut().clear(); 
+            self.current_node_idx = Some(0);
+            self.board = Board::new();
+            self.is_db_mode = is_db;
+            self.load_time_sec = Some(start_time.elapsed().as_secs_f64());
+            
+            if !is_db {
+                if let Some(nodes) = &self.lib_nodes {
+                    let root = &nodes[0];
+                    if root.x() >= 0 && root.y() >= 0 { 
+                        self.board.place_stone(root.x() as usize, root.y() as usize); 
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn process_loaded_file(&mut self, path: &std::path::Path, is_db: bool) {
+        let start_time = web_time::Instant::now();
+        let encoding = self.settings.text_encoding.to_encoding_rs();
+        
+        let mut parser = RenLibParser::new(self.settings.max_nodes);
+        parser.set_encoding(encoding);
+        let mut parse_board = HashBoard::new();
+        
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        
+        // ファイルをオープンしてストリームとして処理（メモリに全展開しない）
+        let result = if let Ok(file) = std::fs::File::open(path) {
+            if is_db {
+                parser.parse_db_from_reader(file)
+            } else {
+                // .lib はファイルサイズが小さく parse_all がスライス前提のため読み込む
+                if let Ok(data) = std::fs::read(path) {
+                    parser.parse_all(&data, &mut parse_board)
+                } else {
+                    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "File read error"))
+                }
+            }
+        } else {
+            return;
+        };
+        
+        if result.is_ok() {
+            self.current_file = Some(file_name);
+            self.current_filepath = Some(path.to_path_buf());
+            self.lib_nodes = Some(parser.nodes);
+            self.hash_table = Some(parser.hash_table);
+            self.node_texts = Some(parser.node_texts);
             self.text_pool = Some(parser.text_pool); 
             self.subtree_cache.borrow_mut().clear(); 
             self.current_node_idx = Some(0);
@@ -290,16 +345,6 @@ impl RenjuApp {
 
             if let Some(ht) = &self.hash_table {
                 if let Some(&head) = ht.get(&h) {
-                    if let Some(nodes) = &self.lib_nodes {
-                        let mut curr = head;
-                        while curr != NO_NODE {
-                            let i = curr as usize;
-                            if nodes[i].comment_id() != NO_TEXT || nodes[i].text_id() != NO_TEXT {
-                                return Some(i);
-                            }
-                            curr = nodes[i].hash_next;
-                        }
-                    }
                     return Some(head as usize);
                 }
             }
@@ -364,15 +409,13 @@ impl RenjuApp {
 
                         let new_idx = nodes.len();
                         nodes.push(RenLibNode::new(
-                            ux as i8, uy as i8, NO_TEXT, NO_TEXT, idx as u32, NO_NODE, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
+                            ux as i8, uy as i8, idx as u32, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
                         ));
                         
                         nodes[idx].child = new_idx as u32; 
                         self.current_node_idx = Some(new_idx);
                         
                         if let Some(ht) = &mut self.hash_table {
-                            let head = ht.get(&new_hash).copied().unwrap_or(NO_NODE);
-                            nodes[new_idx].hash_next = head;
                             ht.insert(new_hash, new_idx as u32);
                         }
                         self.subtree_cache.borrow_mut().clear();
@@ -405,19 +448,7 @@ impl RenjuApp {
                             let h = nodes[s_idx].hash;
                             if let Some(&head) = ht.get(&h) {
                                 if head == s_idx as u32 {
-                                    let next = nodes[s_idx].hash_next;
-                                    if next == NO_NODE { ht.remove(&h); } else { ht.insert(h, next); }
-                                } else {
-                                    let mut prev = head;
-                                    let mut curr = nodes[prev as usize].hash_next;
-                                    while curr != NO_NODE {
-                                        if curr == s_idx as u32 {
-                                            nodes[prev as usize].hash_next = nodes[curr as usize].hash_next;
-                                            break;
-                                        }
-                                        prev = curr;
-                                        curr = nodes[curr as usize].hash_next;
-                                    }
+                                    ht.remove(&h);
                                 }
                             }
                         }
@@ -587,7 +618,7 @@ impl RenjuApp {
             self.lib_nodes.clone()
         };
 
-        if let (Some(nodes), Some(pool)) = (nodes_to_save, &self.text_pool) {
+        if let (Some(nodes), Some(pool), Some(node_texts)) = (nodes_to_save, &self.text_pool, &self.node_texts) {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 if let Some(path) = rfd::FileDialog::new()
@@ -598,7 +629,7 @@ impl RenjuApp {
                     let is_db = path.extension().and_then(|s| s.to_str()) == Some("db");
                     let encoding = self.settings.text_encoding.to_encoding_rs();
                     let mut writer = RenLibWriter::new(encoding);
-                    let data = if is_db { writer.save_db(&nodes, pool) } else { writer.save(&nodes, pool) };
+                    let data = if is_db { writer.save_db(&nodes, node_texts, pool) } else { writer.save(&nodes, node_texts, pool) };
                     if std::fs::write(&path, data).is_ok() && !branch_only {
                         // 全体保存の場合は現在のファイルパスを更新する
                         self.current_filepath = Some(path.clone());
@@ -610,7 +641,7 @@ impl RenjuApp {
             {
                 let encoding = self.settings.text_encoding.to_encoding_rs();
                 let mut writer = RenLibWriter::new(encoding);
-                let data = writer.save(&nodes, pool); 
+                let data = writer.save(&nodes, node_texts, pool); 
                 wasm_bindgen_futures::spawn_local(async move {
                     if let Some(handle) = rfd::AsyncFileDialog::new().add_filter("RenLib files", &["lib"]).set_file_name("saved_game.lib").save_file().await {
                         let _ = handle.write(&data).await;
@@ -624,11 +655,11 @@ impl RenjuApp {
     fn overwrite_save(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if let (Some(path), Some(nodes), Some(pool)) = (&self.current_filepath, &self.lib_nodes, &self.text_pool) {
+            if let (Some(path), Some(nodes), Some(pool), Some(node_texts)) = (&self.current_filepath, &self.lib_nodes, &self.text_pool, &self.node_texts) {
                 let is_db = path.extension().and_then(|s| s.to_str()) == Some("db");
                 let encoding = self.settings.text_encoding.to_encoding_rs();
                 let mut writer = RenLibWriter::new(encoding);
-                let data = if is_db { writer.save_db(nodes, pool) } else { writer.save(nodes, pool) };
+                let data = if is_db { writer.save_db(nodes, node_texts, pool) } else { writer.save(nodes, node_texts, pool) };
                 let _ = std::fs::write(path, data);
             } else {
                 self.save_file_dialog(false);
@@ -644,35 +675,118 @@ impl RenjuApp {
 }
 
 impl RenjuApp {
-
+    #[inline(always)]
+    pub fn get_comment_id(&self, idx: usize) -> u32 {
+        if let Some(map) = &self.node_texts {
+            if idx < map.len() {
+                let texts = map[idx];
+                let id = texts & 0xFFFF;
+                if id != 0xFFFF { return id; }
+            }
+        }
+        NO_TEXT
+    }
     
+    #[inline(always)]
+    pub fn get_text_id(&self, idx: usize) -> u32 {
+        if let Some(map) = &self.node_texts {
+            if idx < map.len() {
+                let texts = map[idx];
+                let id = (texts >> 16) & 0xFFFF;
+                if id != 0xFFFF { return id; }
+            }
+        }
+        NO_TEXT
+    }
     
-
+    #[inline(always)]
+    pub fn set_comment_id(&mut self, idx: usize, id: u32) {
+        if let Some(map) = &mut self.node_texts {
+            // idx がはみ出す場合は領域を拡張する（手動で手を打った場合など）
+            if idx >= map.len() { map.resize(idx + 1, 0xFFFF | (0xFFFF << 16)); }
+            let cid = std::cmp::min(id, 0xFFFF);
+            map[idx] = (map[idx] & 0xFFFF0000) | cid;
+        }
+    }
     
+    #[inline(always)]
+    pub fn set_text_id(&mut self, idx: usize, id: u32) {
+        if let Some(map) = &mut self.node_texts {
+            // idx がはみ出す場合は領域を拡張する
+            if idx >= map.len() { map.resize(idx + 1, 0xFFFF | (0xFFFF << 16)); }
+            let tid = std::cmp::min(id, 0xFFFF);
+            map[idx] = (map[idx] & 0x0000FFFF) | (tid << 16);
+        }
+    }
 
-    
+    pub fn decode_comment(&self, idx: usize) -> Option<String> {
+        let cid = self.get_comment_id(idx);
+        if cid == NO_TEXT { return None; }
+        if let Some(pool) = &self.text_pool {
+            let enc = self.settings.text_encoding.to_encoding_rs();
+            return pool.get(cid).map(|b| enc.decode(b).0.into_owned());
+        }
+        None
+    }
 
-    
-    
-    
-    
+    pub fn decode_text(&self, idx: usize) -> Option<String> {
+        let tid = self.get_text_id(idx);
+        if tid == NO_TEXT { return None; }
+        if let Some(pool) = &self.text_pool {
+            let enc = self.settings.text_encoding.to_encoding_rs();
+            return pool.get(tid).map(|b| enc.decode(b).0.into_owned());
+        }
+        None
+    }
 
-
-
-    
-
-    
-
-    
-
-    
-
-
-    
-
-    
-
+    pub fn get_subtree_size(&self, idx: usize) -> usize {
+        if let Some(nodes) = &self.lib_nodes {
+            let mut cache = self.subtree_cache.borrow_mut();
+            if let Some(&c) = cache.get(&idx) { return c; }
+            
+            let mut count = 0;
+            let mut stack = vec![nodes[idx].child];
+            while let Some(curr) = stack.pop() {
+                if curr != NO_NODE {
+                    count += 1;
+                    stack.push(nodes[curr as usize].sibling);
+                    stack.push(nodes[curr as usize].child);
+                }
+            }
+            cache.insert(idx, count);
+            count
+        } else { 0 }
+    }
 }
+
+    
+    
+
+    
+
+    
+
+    
+    
+    
+    
+
+
+
+    
+
+    
+
+    
+
+    
+
+
+    
+
+    
+
+
 
 impl eframe::App for RenjuApp {
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {

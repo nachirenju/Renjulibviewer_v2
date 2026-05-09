@@ -1,5 +1,4 @@
 use byteorder::{LittleEndian, WriteBytesExt};
-use rustc_hash::FxHashMap;
 
 use crate::core::node::*;
 use crate::core::zobrist::Zobrist;
@@ -30,7 +29,7 @@ impl RenLibWriter {
         }
     }
 
-    pub fn save(&mut self, nodes: &[RenLibNode], pool: &TextPool) -> Vec<u8> {
+    pub fn save(&mut self, nodes: &[RenLibNode], node_texts: &[u32], pool: &TextPool) -> Vec<u8> {
         self.buffer.clear();
         self.buffer.extend_from_slice(&[0u8; 20]);
 
@@ -65,8 +64,15 @@ impl RenLibWriter {
             let mut flags = 0u8;
             if real_child == NO_NODE  { flags |= MASK_NOCHILD; }
             if idx != 0 && real_sibling != NO_NODE { flags |= MASK_SIBLING; }
-            if node.comment_id() != NO_TEXT { flags |= MASK_COMMENT; }
-            if node.text_id() != NO_TEXT    { flags |= MASK_TEXT; }
+            
+            let texts = node_texts.get(idx as usize).copied().unwrap_or(0xFFFF | (0xFFFF << 16));
+            let mut comment_id = texts & 0xFFFF;
+            if comment_id == 0xFFFF { comment_id = NO_TEXT; }
+            let mut text_id = (texts >> 16) & 0xFFFF;
+            if text_id == 0xFFFF { text_id = NO_TEXT; }
+
+            if comment_id != NO_TEXT { flags |= MASK_COMMENT; }
+            if text_id != NO_TEXT    { flags |= MASK_TEXT; }
             self.buffer.push(flags);
 
             if (flags & MASK_TEXT) != 0 {
@@ -75,8 +81,8 @@ impl RenLibWriter {
             }
 
             // コメントが存在する場合、バッファにコメントデータを書き込む
-            if node.comment_id() != NO_TEXT {
-                if let Some(comment_bytes) = pool.get(node.comment_id()) {
+            if comment_id != NO_TEXT {
+                if let Some(comment_bytes) = pool.get(comment_id) {
                     self.buffer.extend_from_slice(comment_bytes);
                     self.buffer.push(0);
                     // 偶数バイト境界に合わせるためのパディングを追加する
@@ -85,8 +91,8 @@ impl RenLibWriter {
             }
             
             // テキストが存在する場合、バッファにテキストデータを書き込む
-            if node.text_id() != NO_TEXT {
-                if let Some(text_bytes) = pool.get(node.text_id()) {
+            if text_id != NO_TEXT {
+                if let Some(text_bytes) = pool.get(text_id) {
                     self.buffer.extend_from_slice(text_bytes);
                     self.buffer.push(0);
                     // 偶数バイト境界に合わせるためのパディングを追加する
@@ -103,7 +109,7 @@ impl RenLibWriter {
         self.buffer.clone()
     }
 
-    pub fn save_db(&mut self, nodes: &[RenLibNode], pool: &TextPool) -> Vec<u8> {
+    pub fn save_db(&mut self, nodes: &[RenLibNode], node_texts: &[u32], pool: &TextPool) -> Vec<u8> {
         self.buffer.clear();
 
         if nodes.is_empty() {
@@ -122,8 +128,8 @@ impl RenLibWriter {
         }
 
         let mut entries: Vec<DbEntry> = Vec::new();
-        let mut node_to_entry: FxHashMap<usize, usize> = FxHashMap::default();
-        let mut btxt_map: FxHashMap<usize, Vec<(i8, i8, String)>> = FxHashMap::default();
+        let mut node_to_entry: rustc_hash::FxHashMap<usize, usize> = rustc_hash::FxHashMap::default();
+        let mut btxt_map: rustc_hash::FxHashMap<usize, Vec<(i8, i8, String)>> = rustc_hash::FxHashMap::default();
 
         let mut move_stack: Vec<(i8, i8)> = Vec::new();
         let mut dfs_stack: Vec<(usize, bool)> = Vec::new(); 
@@ -148,11 +154,29 @@ impl RenLibWriter {
                 }
 
                 let depth = move_stack.len() as u8;
-                let (label, value) = if let Some(t) = node.decode_text(pool, self.encoding) {
+                
+                let mut node_text_str = None;
+                let mut node_comment_str = None;
+                if let Some(&texts) = node_texts.get(idx) {
+                    let tid = (texts >> 16) & 0xFFFF;
+                    if tid != 0xFFFF {
+                        if let Some(b) = pool.get(tid) {
+                            node_text_str = Some(self.encoding.decode(b).0.into_owned());
+                        }
+                    }
+                    let cid = texts & 0xFFFF;
+                    if cid != 0xFFFF {
+                        if let Some(b) = pool.get(cid) {
+                            node_comment_str = Some(self.encoding.decode(b).0.into_owned());
+                        }
+                    }
+                }
+
+                let (label, value) = if let Some(t) = node_text_str {
                     if self.is_label_value_text(&t) { self.text_to_label_value(&t, depth as usize) } else { (0, 0) }
                 } else { (0, 0) };
 
-                let comment = node.decode_comment(pool, self.encoding).unwrap_or_default();
+                let comment = node_comment_str.unwrap_or_default();
 
                 let entry_idx = entries.len();
                 node_to_entry.insert(idx, entry_idx);
@@ -176,11 +200,17 @@ impl RenLibWriter {
                 if let Some(&entry_idx) = node_to_entry.get(&idx) {
                     // 各子ノードのテキスト情報を収集し、盤面のテキストマーク（BTXT）として保存する
                     for &c_idx in &children {
-                        if let Some(text) = nodes[c_idx].decode_text(pool, self.encoding) {
-                            if !self.is_label_value_text(&text) {
-                                if nodes[c_idx].x() >= 0 && nodes[c_idx].y() >= 0 {
-                                    btxt_map.entry(entry_idx).or_default()
-                                        .push((nodes[c_idx].x(), nodes[c_idx].y(), text.clone()));
+                        if let Some(&texts) = node_texts.get(c_idx) {
+                            let tid = (texts >> 16) & 0xFFFF;
+                            if tid != 0xFFFF {
+                                if let Some(b) = pool.get(tid) {
+                                    let text = self.encoding.decode(b).0.into_owned();
+                                    if !self.is_label_value_text(&text) {
+                                        if nodes[c_idx].x() >= 0 && nodes[c_idx].y() >= 0 {
+                                            btxt_map.entry(entry_idx).or_default()
+                                                .push((nodes[c_idx].x(), nodes[c_idx].y(), text));
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -193,7 +223,7 @@ impl RenLibWriter {
             }
         }
 
-        let mut final_entries: FxHashMap<Vec<i8>, DbEntry> = FxHashMap::default();
+        let mut final_entries: rustc_hash::FxHashMap<Vec<i8>, DbEntry> = rustc_hash::FxHashMap::default();
 
         // 収集したエントリについて、対称性を考慮して正規化された盤面状態（一意なキー）を計算・統合する
         for (entry_idx, entry) in entries.into_iter().enumerate() {

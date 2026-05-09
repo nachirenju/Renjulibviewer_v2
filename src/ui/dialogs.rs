@@ -173,13 +173,11 @@ pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
                                 } else if let Some(idx) = current_idx {
                                     let new_idx = nodes.len();
                                     nodes.push(RenLibNode::new(
-                                        coord.0, coord.1, NO_TEXT, NO_TEXT, idx as u32, NO_NODE, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
+                                        coord.0, coord.1, idx as u32, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
                                     ));
                                     nodes[idx].child = new_idx as u32; 
                                     
                                     if let Some(ht) = &mut app.hash_table {
-                                        let head = ht.get(&new_hash).copied().unwrap_or(NO_NODE);
-                                        nodes[new_idx].hash_next = head;
                                         ht.insert(new_hash, new_idx as u32);
                                     }
                                     new_idx
@@ -193,15 +191,10 @@ pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
 
                                 if let Some(ht) = &app.hash_table {
                                     if let Some(&head) = ht.get(&new_hash) {
-                                        let mut curr = head;
-                                        while curr != NO_NODE {
-                                            let i = curr as usize;
-                                            nodes[i].set_text_id(new_text_id);
-                                            curr = nodes[i].hash_next;
-                                        }
+                                        app.set_text_id(head as usize, new_text_id);
                                     }
                                 }
-                                nodes[target_idx].set_text_id(new_text_id);
+                                app.set_text_id(target_idx, new_text_id);
                                 app.subtree_cache.borrow_mut().clear();
                             }
                             app.editing_coord = None;

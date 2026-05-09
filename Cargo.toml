@@ -25,6 +25,8 @@ rustc-hash = "2.1"
 rand = "0.8"
 web-time = "1.1"
 memmap2 = "0.9"
+pollster = "0.3"
+rayon = "1.10"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 rand = "0.8"
@@ -34,6 +36,7 @@ web-time = "1.1"
 log = "0.4"
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "Storage"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 # --- Windows専用 ---
 [target.'cfg(target_os = "windows")'.dependencies]

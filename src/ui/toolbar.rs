@@ -21,20 +21,7 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                     {
                         if let Some(path) = rfd::FileDialog::new().add_filter("Renju Files", &["lib", "db"]).pick_file() {
                             let is_db = path.extension().and_then(|s| s.to_str()) == Some("db");
-                            let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("Unknown").to_string();
-                            
-                            app.current_filepath = Some(path.clone());
-                            
-                            if let Ok(file) = std::fs::File::open(&path) {
-                                match unsafe { memmap2::Mmap::map(&file) } {
-                                    Ok(mmap) => { app.process_loaded_data(&mmap, file_name, is_db); }
-                                    Err(_) => {
-                                        if let Ok(data) = std::fs::read(&path) {
-                                            app.process_loaded_data(&data, file_name, is_db);
-                                        }
-                                    }
-                                }
-                            }
+                            app.process_loaded_file(&path, is_db);
                         }
                     }
 

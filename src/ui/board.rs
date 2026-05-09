@@ -49,15 +49,10 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
                     if let Some(ht) = &app.hash_table {
                         if let Some(&head) = ht.get(&h) {
                             found_idx = Some(head as usize);
-                            if let Some(nodes) = &app.lib_nodes {
-                                let mut curr = head;
-                                while curr != NO_NODE {
-                                    let i = curr as usize;
-                                    if nodes[i].comment_id() != NO_TEXT || nodes[i].text_id() != NO_TEXT {
-                                        found_idx = Some(i);
-                                        break;
-                                    }
-                                    curr = nodes[i].hash_next;
+                            if let Some(&i) = ht.get(&h) {
+                                let i = i as usize;
+                                if app.get_comment_id(i) != NO_TEXT || app.get_text_id(i) != NO_TEXT {
+                                    found_idx = Some(i);
                                 }
                             }
                         }
@@ -210,18 +205,8 @@ pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, respon
 
                             if let Some(ht) = &app.hash_table {
                                 if let Some(&head) = ht.get(&new_hash) {
-                                    if let Some(nodes) = &app.lib_nodes {
-                                        if let Some(pool) = &app.text_pool {
-                                            let encoding = app.settings.text_encoding.to_encoding_rs();
-                                            let mut curr = head;
-                                            while curr != NO_NODE {
-                                                let i = curr as usize;
-                                                if let Some(t) = nodes[i].decode_text(pool, encoding) {
-                                                    app.editing_text = t; break;
-                                                }
-                                                curr = nodes[i].hash_next;
-                                            }
-                                        }
+                                    if let Some(t) = app.decode_text(head as usize) {
+                                        app.editing_text = t;
                                     }
                                 }
                             }
@@ -402,23 +387,18 @@ pub fn draw_branches(app: &crate::RenjuApp, ctx: &egui::Context, painter: &egui:
                                 let mut has_other_branches = false;
                                 let mut explicit_node = None;
                                 let mut node_with_text = None;
-                                let mut first_node = None;
+                                let first_node = head as usize;
 
-                                let mut curr = head;
-                                while curr != NO_NODE {
-                                    let i = curr as usize;
-                                    if first_node.is_none() { first_node = Some(i); }
-                                    if nodes[i].x() == x as i8 && nodes[i].y() == y as i8 { explicit_node = Some(i); }
-                                    if Some(i) != direct_c_idx { has_other_branches = true; }
-                                    if nodes[i].text_id() != NO_TEXT { node_with_text = Some(i); }
-                                    curr = nodes[i].hash_next;
-                                }
+                                let i = head as usize;
+                                if nodes[i].x() == x as i8 && nodes[i].y() == y as i8 { explicit_node = Some(i); }
+                                if Some(i) != direct_c_idx { has_other_branches = true; }
+                                if app.get_text_id(i) != NO_TEXT { node_with_text = Some(i); }
                                 
                                 if has_other_branches {
                                     if explicit_node.is_some() { move_type = Some(MoveType::Merge); } else { move_type = Some(MoveType::Symmetry); }
                                 } else if direct_c_idx.is_some() { move_type = Some(MoveType::Normal); }
 
-                                target_node_idx = node_with_text.or(explicit_node).or(direct_c_idx).or(first_node);
+                                target_node_idx = node_with_text.or(explicit_node).or(direct_c_idx).or(Some(first_node));
                                     
                             } else if let Some(c_idx) = direct_c_idx {
                                 move_type = Some(MoveType::Normal);
@@ -435,43 +415,14 @@ pub fn draw_branches(app: &crate::RenjuApp, ctx: &egui::Context, painter: &egui:
                             if move_type.is_some() {
                                 let mut text = None;
 
-                                // 1. テキストやコメントは今まで通り target_node_idx から取得
                                 if let Some(idx) = target_node_idx {
-                                    if let Some(pool) = &app.text_pool {
-                                        let encoding = app.settings.text_encoding.to_encoding_rs();
-                                        text = nodes[idx].decode_text(pool, encoding);
-                                    }
+                                    text = app.decode_text(idx);
                                 }
 
-                                // 2. 分岐数(count)の計算
                                 let mut max_c = 0;
 
-                                // (A) まず、現在のハッシュに直接紐づくノードのサブツリーサイズを取得
                                 if let Some(&head) = app.hash_table.as_ref().and_then(|ht| ht.get(&h)) {
-                                    let mut curr_node = head;
-                                    while curr_node != NO_NODE {
-                                        let n_idx = curr_node as usize;
-                                        let c = {
-                                            let mut cache = app.subtree_cache.borrow_mut();
-                                            if let Some(&cached_c) = cache.get(&n_idx) {
-                                                cached_c
-                                            } else {
-                                                let mut sub_c = 0;
-                                                let mut stack = vec![nodes[n_idx].child];
-                                                while let Some(curr) = stack.pop() {
-                                                    if curr != NO_NODE {
-                                                        sub_c += 1;
-                                                        stack.push(nodes[curr as usize].sibling);
-                                                        stack.push(nodes[curr as usize].child);
-                                                    }
-                                                }
-                                                cache.insert(n_idx, sub_c);
-                                                sub_c
-                                            }
-                                        };
-                                        if c > max_c { max_c = c; }
-                                        curr_node = nodes[n_idx].hash_next;
-                                    }
+                                    max_c = app.get_subtree_size(head as usize);
                                 }
 
                                 // (B) 手順前後で1手先に巨大な合流ツリーが隠れているケースを拾うための「1手先読み」
@@ -492,30 +443,8 @@ pub fn draw_branches(app: &crate::RenjuApp, ctx: &egui::Context, painter: &egui:
 
                                                 // 1手先のハッシュがDBに存在すれば、そのツリーサイズを確認
                                                 if let Some(&next_head) = app.hash_table.as_ref().and_then(|ht| ht.get(&h_next)) {
-                                                    let mut curr_node = next_head;
-                                                    while curr_node != NO_NODE {
-                                                        let n_idx = curr_node as usize;
-                                                        let c = {
-                                                            let mut cache = app.subtree_cache.borrow_mut();
-                                                            if let Some(&cached_c) = cache.get(&n_idx) {
-                                                                cached_c
-                                                            } else {
-                                                                let mut sub_c = 0;
-                                                                let mut stack = vec![nodes[n_idx].child];
-                                                                while let Some(curr) = stack.pop() {
-                                                                    if curr != NO_NODE {
-                                                                        sub_c += 1;
-                                                                        stack.push(nodes[curr as usize].sibling);
-                                                                        stack.push(nodes[curr as usize].child);
-                                                                    }
-                                                                }
-                                                                cache.insert(n_idx, sub_c);
-                                                                sub_c
-                                                            }
-                                                        };
-                                                        if c > lookahead_max { lookahead_max = c; }
-                                                        curr_node = nodes[n_idx].hash_next;
-                                                    }
+                                                    let c = app.get_subtree_size(next_head as usize);
+                                                    if c > lookahead_max { lookahead_max = c; }
                                                 }
                                             }
                                         }
