@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<head>
+    <title>Renjulibviewer</title>
+   
+    <link rel="icon" type="image/png" href="app_icon.png">
+    <link rel="apple-touch-icon" href="app_icon.png">
+    <link rel="manifest" href="manifest.json">
+
+    <link data-trunk rel="copy-file" href="app_icon.png" />
+    <link data-trunk rel="copy-file" href="manifest.json" />
+
+    <link data-trunk rel="rust" data-wasm-opt="z" />
+    <style>
+        html, body, canvas {
+            margin: 0px;
+            padding: 0px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #222222;
+        }
+
+        /* ---------------------------------------------------
+           rfd が生成するダイアログ要素を適正サイズで上下に並べる
+        --------------------------------------------------- */
+
+        /* ファイルを選択するボタン (画面中央より少し上) */
+        body > input[type="file"] {
+            position: fixed !important;
+            top: 40% !important; /* 画面の40%の高さ */
+            left: 50% !important;
+            transform: translate(-50%, -50%) !important;
+            z-index: 99999 !important;
+            background-color: #f9ebcf !important; /* 連珠盤カラー */
+            padding: 10px 15px !important;
+            border-radius: 8px !important;
+            border: 2px solid #d4c19c !important;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5) !important;
+            cursor: pointer !important;
+            font-size: 16px !important; /* スマホでもPCでも適正なサイズ */
+            color: #333 !important;
+            max-width: 80% !important; /* 画面からはみ出さないようにする */
+        }
+
+        /* ブラウザ標準の「ファイルを選択」パーツの調整 */
+        body > input[type="file"]::file-selector-button {
+            font-size: 16px !important;
+            font-weight: bold !important;
+            padding: 8px 16px !important;
+            cursor: pointer !important;
+            background-color: #ffffff !important;
+            color: #333 !important;
+            border: 2px solid #ccc !important;
+            border-radius: 6px !important;
+            margin-right: 15px !important;
+        }
+
+        /* キャンセルボタン (画面中央より少し下) */
+        body > button {
+            position: fixed !important;
+            top: 60% !important; /* 画面の60%の高さ */
+            left: 50% !important;
+            transform: translate(-50%, -50%) !important;
+            z-index: 99999 !important;
+            font-size: 16px !important; /* 大きすぎたのを修正 */
+            font-weight: bold !important;
+            padding: 10px 30px !important; /* 横長になりすぎない余白 */
+            border-radius: 8px !important;
+            background-color: #666666 !important; /* キャンセルらしいグレー */
+            color: #ffffff !important;
+            border: none !important;
+            cursor: pointer !important;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5) !important;
+            white-space: nowrap !important; /* 文字の折り返しを防ぐ */
+        }
+    </style>
+</head>
+<body>
+    <canvas id="the_canvas_id"></canvas>
+</body>
+</html>

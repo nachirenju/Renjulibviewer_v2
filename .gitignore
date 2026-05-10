@@ -1,0 +1,22 @@
+# --- Rust ---
+/target/
+
+# --- Trunk (Wasm) ---
+/dist/
+
+# --- IDEs / Editors ---
+/.vscode/
+/.idea/
+/*.swp
+/*.swo
+/.vs/
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+
+# --- Temporary / Scripts ---
+/*.exe
+/*.pdb
+/*.rs.bk
+/renju_lz4_temp_*
