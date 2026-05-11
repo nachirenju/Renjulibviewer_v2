@@ -24,7 +24,7 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
 
         crate::ui::board::draw_grid_and_coords(app, &painter, rect, cell_size);
 
-            // --- 計算: 現在の局面状態を取得 (不変借用) ---
+            // --- ★計算: 現在の局面状態を取得 (不変借用) ---
             let gif_current_move = match app.export_state {
                 ExportState::GifWaitCapture(_, c) => Some(c),
                 ExportState::GifCaptureRequested(_, c) => Some(c),

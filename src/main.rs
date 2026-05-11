@@ -184,7 +184,7 @@ pub struct RenjuApp {
     pub board: Board,
     pub lib_nodes: Option<Vec<RenLibNode>>,
     pub hash_table: Option<FxHashMap<u64, u32>>, 
-    pub node_texts: Option<Vec<u32>>, // FxHashMap から Vec に
+    pub node_texts: Option<Vec<u32>>, // FxHashMap から Vec に変更
     pub text_pool: Option<TextPool>, 
     pub current_node_idx: Option<usize>,
     pub is_db_mode: bool,
@@ -222,7 +222,7 @@ impl RenjuApp {
             board: Board::new(),
             lib_nodes: Some(vec![root_node]),
             hash_table: Some(hash_table),
-            node_texts: Some(Vec::new()), // default から Vec::new() に
+            node_texts: Some(Vec::new()), // default から Vec::new() に変更
             text_pool: Some(TextPool::new()), 
             current_node_idx: Some(0),
             is_db_mode: false,
@@ -409,7 +409,7 @@ impl RenjuApp {
 
                         let new_idx = nodes.len();
                         nodes.push(RenLibNode::new(
-                            ux as i8, uy as i8, idx as u32, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
+                            ux as i8, uy as i8, idx as u32, NO_NODE, nodes[idx].child, new_hash, nodes[idx].depth() + 1
                         ));
                         
                         nodes[idx].child = new_idx as u32; 

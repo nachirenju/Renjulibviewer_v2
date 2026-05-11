@@ -173,7 +173,7 @@ pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
                                 } else if let Some(idx) = current_idx {
                                     let new_idx = nodes.len();
                                     nodes.push(RenLibNode::new(
-                                        coord.0, coord.1, idx as u32, nodes[idx].child, NO_NODE, new_hash, nodes[idx].depth() + 1
+                                        coord.0, coord.1, idx as u32, NO_NODE, nodes[idx].child, new_hash, nodes[idx].depth() + 1
                                     ));
                                     nodes[idx].child = new_idx as u32; 
                                     
