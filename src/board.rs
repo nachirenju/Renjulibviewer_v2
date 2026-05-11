@@ -1,3 +1,4 @@
+// 連珠盤の論理的な状態管理、石の配置、および履歴管理を行う
 pub const SIZE: usize = 15;
 
 #[derive(Clone, Copy, PartialEq)]

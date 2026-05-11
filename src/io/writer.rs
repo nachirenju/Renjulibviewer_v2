@@ -1,3 +1,4 @@
+// 局面ツリーやデータベースを .lib および .db 形式でファイルに保存する
 use byteorder::{LittleEndian, WriteBytesExt};
 
 use crate::core::node::*;

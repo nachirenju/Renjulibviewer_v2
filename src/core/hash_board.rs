@@ -1,3 +1,4 @@
+// Zobristハッシュ計算と対称性を考慮した、軽量な盤面状態管理を行う
 use super::zobrist::Zobrist;
 
 /// ハッシュ計算専用の盤面表現

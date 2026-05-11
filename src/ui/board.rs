@@ -1,3 +1,4 @@
+// 連珠盤、石、座標、およびマウス操作の描画処理を行う
 use eframe::egui;
 use crate::ExportState;
 use crate::board::SIZE;
@@ -217,7 +218,7 @@ pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, respon
                 }
             }
 
-            let right_clicked = ctx.input(|i| i.pointer.secondary_clicked() || (i.pointer.any_released() && !i.pointer.primary_released()));
+            let right_clicked = response.secondary_clicked();
             if right_clicked && !is_gif_capturing {
                 if app.is_db_mode { app.board.undo(); } else if let Some(idx) = app.current_node_idx {
                     if let Some(nodes) = &app.lib_nodes {

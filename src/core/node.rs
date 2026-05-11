@@ -1,3 +1,4 @@
+// 24バイトに圧縮された局面ノードおよびテキストプールの定義を行う
 use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::{Hash, Hasher};
 

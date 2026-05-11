@@ -1,3 +1,4 @@
+// アプリケーションのエントリポイント、状態管理、およびメインUIループを制御する
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
@@ -27,6 +28,7 @@ use crate::io::writer::RenLibWriter;
 // フォント設定
 // ==========================================
 
+/// カスタムフォントを読み込み、eguiコンテキストに登録する
 pub fn setup_custom_fonts(ctx: &egui::Context, _path: &str) {
     let mut fonts = egui::FontDefinitions::default();
     
@@ -75,6 +77,7 @@ pub fn setup_custom_fonts(ctx: &egui::Context, _path: &str) {
 }
 
 
+/// アプリケーションアイコンを読み込む
 #[cfg(not(target_arch = "wasm32"))]
 fn load_icon() -> egui::IconData {
     let icon_data = include_bytes!("../app_icon.png"); 
@@ -92,6 +95,7 @@ fn load_icon() -> egui::IconData {
 // エントリポイント (起動処理)
 // ==========================================
 
+/// ネイティブ環境でのアプリケーション起動処理
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
     let icon = load_icon();
@@ -112,6 +116,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// WASM環境でのアプリケーション起動処理
 #[cfg(target_arch = "wasm32")]
 fn main() {
     eframe::WebLogger::init(log::LevelFilter::Warn).ok();
@@ -184,7 +189,7 @@ pub struct RenjuApp {
     pub board: Board,
     pub lib_nodes: Option<Vec<RenLibNode>>,
     pub hash_table: Option<FxHashMap<u64, u32>>, 
-    pub node_texts: Option<Vec<u32>>, // FxHashMap から Vec に変更
+    pub node_texts: Option<Vec<u32>>,
     pub text_pool: Option<TextPool>, 
     pub current_node_idx: Option<usize>,
     pub is_db_mode: bool,
@@ -213,6 +218,7 @@ pub struct RenjuApp {
 
 
 impl RenjuApp {
+    /// 設定値を使用してアプリケーション状態を初期化する
     fn new_with_settings(settings: setting::Settings) -> Self {
         let root_node = RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0);
         let mut hash_table = FxHashMap::default();
@@ -222,7 +228,7 @@ impl RenjuApp {
             board: Board::new(),
             lib_nodes: Some(vec![root_node]),
             hash_table: Some(hash_table),
-            node_texts: Some(Vec::new()), // default から Vec::new() に変更
+            node_texts: Some(Vec::new()), 
             text_pool: Some(TextPool::new()), 
             current_node_idx: Some(0),
             is_db_mode: false,
@@ -250,6 +256,34 @@ impl RenjuApp {
         }
     }
 
+    /// 盤面とツリーを完全に初期化し、新規作成状態にする
+    pub fn new_game(&mut self) {
+        self.board = Board::new();
+        self.lib_nodes = Some(vec![RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0)]);
+        
+        let mut hash_table = rustc_hash::FxHashMap::default();
+        hash_table.insert(0, 0);
+        self.hash_table = Some(hash_table);
+        
+        self.node_texts = Some(Vec::new());
+        self.text_pool = Some(TextPool::new()); 
+        self.current_node_idx = Some(0);
+        self.is_db_mode = false;
+        
+        self.current_file = None;
+        self.current_filepath = None;
+        self.load_time_sec = None;
+        
+        // UI・操作状態のクリア
+        self.node_to_delete = None;
+        self.editing_coord = None;
+        self.editing_text.clear();
+        self.ad_hoc_labels.clear();
+        self.subtree_cache.borrow_mut().clear();
+        self.export_state = ExportState::Idle;
+    }
+
+    /// 読み込まれたバイトデータからパースを行い、アプリケーション状態を更新する
     #[cfg(target_arch = "wasm32")]
     fn process_loaded_data(&mut self, data: &[u8], file_name: String, is_db: bool) {
         let start_time = web_time::Instant::now();
@@ -284,6 +318,7 @@ impl RenjuApp {
         }
     }
 
+    /// ファイルパスからデータを読み込み、パースを行う
     #[cfg(not(target_arch = "wasm32"))]
     pub fn process_loaded_file(&mut self, path: &std::path::Path, is_db: bool) {
         let start_time = web_time::Instant::now();
@@ -335,6 +370,7 @@ impl RenjuApp {
         }
     }
 
+    /// 現在の盤面状態に対応するノードのインデックスを取得する
     fn get_current_node(&self) -> Option<usize> {
         if self.is_db_mode {
             let mut pb = HashBoard::new();
@@ -354,10 +390,12 @@ impl RenjuApp {
         }
     }
 
+    /// 盤面を初期状態（ルート）に戻す
     fn reset_to_root(&mut self) {
         if self.is_db_mode {
             self.board.undo_all();
         } else if let Some(nodes) = &self.lib_nodes {
+            // ルートに到達するまで一手ずつ戻る
             while let Some(idx) = self.current_node_idx {
                 if idx == 0 { break; }
                 let node = &nodes[idx];
@@ -378,6 +416,7 @@ impl RenjuApp {
         }
     }
 
+    /// 指定された座標に石を打ち、必要に応じて新しいノードをツリーに追加する
     fn play_move(&mut self, ux: usize, uy: usize) {
         if self.is_db_mode {
             self.board.place_stone(ux, uy);
@@ -386,6 +425,7 @@ impl RenjuApp {
                 let mut child_idx = nodes[idx].child;
                 let mut matched = false;
                 
+                // 同じ座標の既存の子ノードがないか探す
                 while child_idx != NO_NODE {
                     let c_node = &nodes[child_idx as usize];
                     if c_node.x() == ux as i8 && c_node.y() == uy as i8 {
@@ -425,6 +465,7 @@ impl RenjuApp {
         }
     }
 
+    /// 現在選択されている分岐とその子孫をすべて削除する
     fn delete_current_branch(&mut self) {
         if let Some(idx) = self.node_to_delete {
             let is_current = self.get_current_node() == Some(idx);
@@ -433,6 +474,7 @@ impl RenjuApp {
                 if idx > 0 && idx < nodes.len() {
                     let mut subtree_indices = Vec::new();
                     
+                    // スタックを使用して子孫ノードを再帰的に収集する
                     fn collect_subtree(nodes: &[RenLibNode], start: usize, out: &mut Vec<usize>) {
                         out.push(start);
                         let mut curr = nodes[start].child;
@@ -494,6 +536,7 @@ impl RenjuApp {
         }
     }
 
+    /// 履歴または単一の分岐に基づいて一手進める
     fn step_forward(&mut self) -> bool {
         // 1. ユーザーの入力履歴（future_history）があればそれを復元する
         if let Some(&next_pos) = self.board.future_history.last() {
@@ -563,6 +606,7 @@ impl RenjuApp {
     }
 
     // 現在のノードに至るまでの直列な履歴と、現在のノード以下の全分岐を抽出する
+    /// 現在のブランチに関連するノードのみを抽出したツリーを構築する
     fn get_branch_nodes(&self) -> Option<Vec<RenLibNode>> {
         let current_idx = self.get_current_node()?;
         let original = self.lib_nodes.as_ref()?;
@@ -611,6 +655,7 @@ impl RenjuApp {
     }
 
     // 「名前を付けて保存」「分岐保存」のダイアログ処理
+    /// ファイル保存ダイアログを表示し、データを保存する
     fn save_file_dialog(&mut self, branch_only: bool) {
         let nodes_to_save = if branch_only {
             self.get_branch_nodes()
@@ -652,6 +697,7 @@ impl RenjuApp {
     }
 
     // 上書き保存処理（新規作成等でパスがない場合はダイアログへ）
+    /// 現在開いているファイルに上書き保存する
     fn overwrite_save(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -719,6 +765,7 @@ impl RenjuApp {
         }
     }
 
+    /// コメントIDから実際の文字列をデコードして取得する
     pub fn decode_comment(&self, idx: usize) -> Option<String> {
         let cid = self.get_comment_id(idx);
         if cid == NO_TEXT { return None; }
@@ -729,6 +776,7 @@ impl RenjuApp {
         None
     }
 
+    /// テキストIDから実際の文字列をデコードして取得する
     pub fn decode_text(&self, idx: usize) -> Option<String> {
         let tid = self.get_text_id(idx);
         if tid == NO_TEXT { return None; }
@@ -739,12 +787,14 @@ impl RenjuApp {
         None
     }
 
+    /// 指定されたノード以下の全子孫ノード数を計算する（キャッシュ利用）
     pub fn get_subtree_size(&self, idx: usize) -> usize {
         if let Some(nodes) = &self.lib_nodes {
             let mut cache = self.subtree_cache.borrow_mut();
             if let Some(&c) = cache.get(&idx) { return c; }
             
             let mut count = 0;
+            // スタックを使用して子孫ノードを数える
             let mut stack = vec![nodes[idx].child];
             while let Some(curr) = stack.pop() {
                 if curr != NO_NODE {
@@ -793,6 +843,7 @@ impl eframe::App for RenjuApp {
         self.settings.save();
     }
 
+    /// 毎フレームの描画および入力処理のメインループ
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         
         #[cfg(target_arch = "wasm32")]
@@ -973,6 +1024,7 @@ self.gif_frames.push(img_to_push);
 }
 
 impl Drop for RenjuApp {
+    /// アプリケーション終了時に設定を保存する
     fn drop(&mut self) {
         self.settings.save();
     }

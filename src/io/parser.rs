@@ -69,7 +69,7 @@ impl<R: BufRead> ParserContext<R> {
 pub struct RenLibParser {
     pub nodes: Vec<RenLibNode>,
     pub hash_table: FxHashMap<u64, u32>, 
-    pub node_texts: Vec<u32>, // FxHashMap から Vec に変更
+    pub node_texts: Vec<u32>, // FxHashMap から Vec に
     pub max_nodes: usize,
     pub encoding: &'static encoding_rs::Encoding,
     pub text_pool: TextPool, 
@@ -106,7 +106,7 @@ impl RenLibParser {
         Self {
             nodes: Vec::with_capacity(20000),
             hash_table: FxHashMap::default(), 
-            node_texts: Vec::new(), // default から Vec::new() に変更
+            node_texts: Vec::new(), // default から Vec::new() に
             max_nodes,
             encoding: SHIFT_JIS,
             text_pool: TextPool::new(),
@@ -144,8 +144,11 @@ impl RenLibParser {
         // ゼロコピーで文字列（ヌル終端）を抽出するヘルパー関数
         let mut extract_string = || -> u32 {
             let start = *offset;
-            while *offset < data.len() && data[*offset] != 0 {
-                *offset += 1;
+            // イテレータを使って一気にヌル文字を探す（SIMD最適化）
+            if let Some(null_pos) = data[*offset..].iter().position(|&b| b == 0) {
+                *offset += null_pos;
+            } else {
+                *offset = data.len();
             }
             let str_len = *offset - start;
             // ゼロコピーでスライスを切り出す
@@ -187,11 +190,19 @@ impl RenLibParser {
         if data.len() < 20 { return Ok(()); } // ヘッダーサイズ未満は弾く
         let mut offset = 20; // ヘッダー(20バイト)をスキップして開始
         
-        let estimated_nodes = (data.len() / 20).max(1000).min(self.max_nodes);
-        self.nodes.reserve(estimated_nodes);
-        self.hash_table.reserve(estimated_nodes);
-
+        // 1ノード平均3バイトで見積もり
+        let estimated_nodes = (data.len() / 3).max(1000).min(self.max_nodes);
+        
         self.nodes.clear();
+        self.node_texts.clear();
+        self.hash_table.clear(); // ここでの hash_table.reserve は削除
+
+        self.nodes.reserve(estimated_nodes);
+        self.node_texts.reserve(estimated_nodes);
+
+        // ハッシュを一時的に溜め込むフラットな配列
+        let mut flat_hashes = Vec::with_capacity(estimated_nodes);
+
         self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));
         self.node_texts.push(0xFFFF | (0xFFFF << 16)); // ルートノード用のテキスト初期値を追加
 
@@ -262,7 +273,8 @@ impl RenLibParser {
                     self.nodes[curr_idx].hash = hash;
                     self.nodes[curr_idx].set_depth(board.move_count as u8); 
                     
-                    self.hash_table.insert(hash, curr_idx as u32);
+                    // HashMap ではなくフラットな配列に記録
+                    flat_hashes.push((hash, curr_idx as u32));
                 }
 
                 frame.stage = 1;
@@ -271,7 +283,6 @@ impl RenLibParser {
 
                 // 子ノードが存在する場合はパースしてスタックに積む
                 if has_child {
-                    // 子ノードの情報を取得できた場合、リンクを構築する
                     if let Some(child_info) = self.read_node_from_slice(data, &mut offset) {
                         self.nodes[child_info.idx].parent = curr_idx as u32;
                         self.nodes[curr_idx].child = child_info.idx as u32;
@@ -291,7 +302,6 @@ impl RenLibParser {
                 }
                 // 兄弟ノードが存在する場合はパースしてスタックに積む
                 if has_sibling {
-                    // 兄弟ノードの情報を取得できた場合、リンクを構築する
                     if let Some(sib_info) = self.read_node_from_slice(data, &mut offset) {
                         let p_idx = self.nodes[curr_idx].parent;
                         self.nodes[sib_info.idx].parent = p_idx;
@@ -303,7 +313,30 @@ impl RenLibParser {
                     }
                 }
             }
+        } // while let Some(mut frame) = stack.pop() の終了
+
+        // ループ終了後に一気に並列ソート＆重複排除して HashMap を構築
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            flat_hashes.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
         }
+        #[cfg(target_arch = "wasm32")]
+        {
+            flat_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+        }
+
+        // 最初の要素（＝idxが最も大きい最新のノード）だけを残して重複を排除
+        flat_hashes.dedup_by_key(|k| k.0);
+        
+        // メモリのピーク消費を抑えるため、余分なキャパシティを解放
+        flat_hashes.shrink_to_fit();
+
+        // 重複排除されて小さくなったサイズで無駄なく確保して一気に挿入
+        self.hash_table.reserve(flat_hashes.len());
+        for (hash, idx) in flat_hashes {
+            self.hash_table.insert(hash, idx);
+        }
+
         Ok(())
     }
 
@@ -357,7 +390,7 @@ impl RenLibParser {
             self.node_texts.resize(limit + 1, 0xFFFF | (0xFFFF << 16)); // 予め limit+1 個の空データ(0xFFFFFFFF)で埋めておく
             self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));
             
-            // ★追加: 仮想ルート(Index 0)をハッシュ0として確実にテーブルに登録する
+            // 仮想ルート(Index 0)をハッシュ0として確実にテーブルに登録する
             self.hash_table.insert(0, 0);
 
             let mut hash_nexts = Vec::with_capacity(limit + 1);
@@ -561,7 +594,7 @@ impl RenLibParser {
                         continue;
                     }
 
-                    // ★追加: 初期盤面(hash==0)のレコードは、新規追加せずルート(Index 0)のテキストに統合する
+                    // 初期盤面(hash==0)のレコードは、新規追加せずルート(Index 0)のテキストに統合する
                     if hash == 0 {
                         if comment_id != NO_TEXT || text_id != NO_TEXT {
                             let cid = std::cmp::min(comment_id, 0xFFFF);
@@ -734,7 +767,7 @@ impl RenLibParser {
                     let mut p_idx_u32 = head_u32;
                     let mut valid_p_idx = NO_NODE;
                     
-                    // ★変更: チェインを辿り、深さが「自分の深さ - 1」のノードを正しい親として選択する
+                    // チェインを辿り、深さが「自分の深さ - 1」のノードを正しい親として選択する
                     while p_idx_u32 != NO_NODE {
                         if nodes_ref[p_idx_u32 as usize].depth() == depth_b - 1 {
                             valid_p_idx = p_idx_u32;
@@ -743,7 +776,7 @@ impl RenLibParser {
                         p_idx_u32 = hash_nexts[p_idx_u32 as usize];
                     }
                     
-                    // ★変更: 正しい親が見つかった場合のみリンク処理を行う
+                    // 正しい親が見つかった場合のみリンク処理を行う
                     if valid_p_idx != NO_NODE {
                         let p_idx = valid_p_idx as usize;
                         let target_hash = hashes_b[0] ^ cell_hashes[0][color_to_remove as usize];
@@ -806,7 +839,7 @@ impl RenLibParser {
         let results: Vec<Option<ParentSearchResult>> = (1..num_nodes).map(map_func).collect();
 
         // --- 4. 逐次 Reduce / Apply フェーズ ---
-        // ★追加: O(1)で末尾に兄弟を追加するためのキャッシュ配列
+        // O(1)で末尾に兄弟を追加するためのキャッシュ配列
         let mut last_child = vec![NO_NODE; num_nodes]; 
 
         // ここで初めて self.nodes を可変借用し、安全にリンクを繋ぎます
@@ -820,7 +853,7 @@ impl RenLibParser {
                 local_rx[i] = r.rx;
                 local_ry[i] = r.ry;
 
-                // ★変更: 兄弟リンクの構築を O(1) 化
+                // 兄弟リンクの構築を O(1) 化
                 if self.nodes[p_idx].child == NO_NODE {
                     // 子が存在しない場合は最初の子として登録する
                     self.nodes[p_idx].child = i as u32;

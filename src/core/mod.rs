@@ -1,3 +1,4 @@
+// コアデータ構造とロジックをまとめたモジュール定義
 pub mod node;
 pub mod zobrist;
 pub mod hash_board;

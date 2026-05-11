@@ -1,3 +1,4 @@
+// 棋譜データのSGF形式やURL形式などへのエクスポート処理を行う
 /// 着手履歴から標準的な座標表記（例: h8h9j7）を生成する
 pub fn generate_notation(history: &[usize]) -> String {
     let mut s = String::new();

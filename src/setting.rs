@@ -1,3 +1,4 @@
+// アプリケーションの設定、永続化、および表示オプションの管理を行う
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use crate::lang;

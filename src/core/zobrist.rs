@@ -1,3 +1,4 @@
+// Zobristハッシュの定数テーブルおよび対称変換テーブルの管理を行う
 use std::sync::OnceLock;
 
 #[derive(Clone)]

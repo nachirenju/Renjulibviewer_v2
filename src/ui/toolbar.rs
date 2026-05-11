@@ -1,3 +1,4 @@
+// 画面上部のツールバー（ファイル操作、編集、保存、リセット）の描画を行う
 use eframe::egui;
 use crate::lang;
 use crate::ExportState;
@@ -11,6 +12,10 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                 } else { (20.0, 12.0) };
 
                 ui.spacing_mut().item_spacing.x = spacing;
+
+                if ui.button(egui::RichText::new(tr.new_game).size(btn_size)).on_hover_text(tr.new_game_tooltip).clicked() {
+                    app.new_game();
+                }
 
                 if ui.button(egui::RichText::new(tr.settings).size(btn_size)).on_hover_text(tr.settings_tooltip).clicked() {
                     app.settings.show_window = !app.settings.show_window;

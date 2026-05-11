@@ -1,3 +1,4 @@
+// UIの多言語対応および翻訳テキストの定義を行う
 use serde::{Deserialize, Serialize};
 
 /// UI言語
@@ -34,6 +35,8 @@ impl Language {
 /// UI文字列の翻訳テーブル
 #[allow(dead_code)]
 pub struct Tr {
+    pub new_game: &'static str,
+    pub new_game_tooltip: &'static str,
     // --- 右パネル ---
     pub comment: &'static str,
     pub notation: &'static str,
@@ -41,6 +44,8 @@ pub struct Tr {
     pub portal_v1: &'static str,
     pub portal_v2: &'static str,
     pub copy: &'static str,
+    pub cut: &'static str,
+    pub paste: &'static str,
 
     // --- ツールバー ---
     pub show_numbers: &'static str,
@@ -99,12 +104,16 @@ pub fn get(lang: Language) -> &'static Tr {
 }
 
 static TR_JA: Tr = Tr {
+    new_game: "📄",
+    new_game_tooltip: "新規作成 (リセット)",
     comment: "コメント",
     notation: "棋譜",
     sgf: "SGF",
     portal_v1: "Portal V1",
     portal_v2: "Portal V2",
     copy: "📋 コピー",
+    cut: "✂ 切り取り",
+    paste: "📋 貼り付け",
 
     show_numbers: "石番号を表示",
     settings: "⚙",
@@ -149,12 +158,16 @@ static TR_JA: Tr = Tr {
 };
 
 static TR_EN: Tr = Tr {
+    new_game: "📄",
+    new_game_tooltip: "New Game",
     comment: "Comment",
     notation: "Notation",
     sgf: "SGF",
     portal_v1: "Portal V1",
     portal_v2: "Portal V2",
     copy: "📋 Copy",
+    cut: "✂ Cut",
+    paste: "📋 Paste",
 
     show_numbers: "Show move numbers",
     settings: "⚙",
@@ -199,12 +212,16 @@ static TR_EN: Tr = Tr {
 };
 
 static TR_ZH: Tr = Tr {
+    new_game: "📄",
+    new_game_tooltip: "新建 (重置)",
     comment: "注释",
     notation: "棋谱",
     sgf: "SGF",
     portal_v1: "Portal V1",
     portal_v2: "Portal V2",
     copy: "📋 复制",
+    cut: "✂ 剪切",
+    paste: "📋 粘贴",
 
     show_numbers: "显示手数",
     settings: "⚙",
@@ -249,12 +266,16 @@ static TR_ZH: Tr = Tr {
 };
 
 static TR_ZHT: Tr = Tr {
+    new_game: "📄",
+    new_game_tooltip: "新增 (重設)",
     comment: "註釋",
     notation: "棋譜",
     sgf: "SGF",
     portal_v1: "Portal V1",
     portal_v2: "Portal V2",
     copy: "📋 複製",
+    cut: "✂ 剪下",
+    paste: "📋 貼上",
 
     show_numbers: "顯示手數",
     settings: "⚙",
@@ -299,12 +320,16 @@ static TR_ZHT: Tr = Tr {
 };
 
 static TR_KO: Tr = Tr {
+    new_game: "📄",
+    new_game_tooltip: "새 ゲーム (초기화)",
     comment: "코멘트",
     notation: "기보",
     sgf: "SGF",
     portal_v1: "Portal V1",
     portal_v2: "Portal V2",
     copy: "📋 복사",
+    cut: "✂ 잘라내기",
+    paste: "📋 붙여넣기",
 
     show_numbers: "수순 표시",
     settings: "⚙",

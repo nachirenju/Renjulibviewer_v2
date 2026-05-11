@@ -1,3 +1,4 @@
+// プロジェクトのビルド設定およびアセットの埋め込み処理を行うビルドスクリプト
 fn main() {
     // CARGO_CFG_TARGET_OS は「ビルド先のOS」を表します。
     // Wasmビルドの時は "unknown" や "none" になるため、Windows判定を回避できます。

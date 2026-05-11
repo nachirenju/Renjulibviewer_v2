@@ -1,3 +1,4 @@
+// 設定、バージョン情報、削除確認などの各種ダイアログの描画を行う
 use eframe::egui;
 use crate::lang;
 use crate::ExportState;
