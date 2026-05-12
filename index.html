@@ -4,7 +4,8 @@
 
 <head>
     <title>Renjulibviewer</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 
     <link rel="icon" type="image/png" href="app_icon.png">
     <link rel="apple-touch-icon" href="app_icon.png">
@@ -16,7 +17,18 @@
     <link data-trunk rel="rust" data-wasm-opt="z" />
     <style>
         html,
-        body,
+        body {
+            margin: 0px;
+            padding: 0px;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #222222;
+            position: fixed; /* 画面位置を固定 */
+            touch-action: none; /* ブラウザによるズーム・スクロールを無効化 */
+            overscroll-behavior: none;
+        }
+
         canvas {
             margin: 0px;
             padding: 0px;
@@ -24,7 +36,38 @@
             height: 100%;
             overflow: hidden;
             background: #222222;
+            position: fixed;
             touch-action: none;
+            /* Canvas のみズーム・スクロールを無効化 */
+            user-select: text;
+            -webkit-user-select: text;
+            overscroll-behavior: none;
+        }
+
+        /* Prevent auto-zoom on mobile browsers when focusing text inputs */
+        input,
+        textarea,
+        select {
+            font-size: 16px !important;
+            touch-action: auto !important;
+        }
+
+        /* 隠し入力欄がフォーカスされた時、Safari に「本物の入力欄」と認識させるための設定 */
+        input:focus,
+        textarea:focus {
+            /* Canvas より前面に持ってくる */
+            position: absolute !important;
+            z-index: 1000 !important;
+            /* 存在感を出すために 0.1 に設定 */
+            opacity: 0.1 !important;
+            /* サイズを大きく確保して Safari に標的として認識させる */
+            width: 100px !important;
+            height: 40px !important;
+            /* テキストや背景は透明にして、アプリの見た目を邪魔しないようにする */
+            background: white !important;
+            color: transparent !important;
+            /* iOS のカーソル（青い棒）だけは見えるようにすると、操作感が向上します */
+            caret-color: #007AFF !important;
         }
 
         /* ---------------------------------------------------
@@ -41,21 +84,21 @@
             z-index: 99999 !important;
             background-color: #f9ebcf !important;
             /* 連珠盤カラー */
-            padding: 15px 20px !important;
-            border-radius: 12px !important;
+            padding: 10px 15px !important;
+            border-radius: 8px !important;
             border: 2px solid #d4c19c !important;
             box-shadow: 0 4px 10px rgba(0, 0, 0, 0.5) !important;
             cursor: pointer !important;
-            font-size: 40px !important;
-            /* 大きめの文字 */
+            font-size: 16px !important;
+            /* スマホでもPCでも適正なサイズ */
             color: #333 !important;
-            max-width: 90% !important;
-            /* 画面からはみ出さない */
+            max-width: 80% !important;
+            /* 画面からはみ出さないようにする */
         }
 
         /* ブラウザ標準の「ファイルを選択」パーツの調整 */
         body>input[type="file"]::file-selector-button {
-            font-size: 40px !important;
+            font-size: 16px !important;
             font-weight: bold !important;
             padding: 8px 16px !important;
             cursor: pointer !important;
@@ -74,12 +117,12 @@
             left: 50% !important;
             transform: translate(-50%, -50%) !important;
             z-index: 99999 !important;
-            font-size: 40px !important;
-            /* 大きめの文字 */
+            font-size: 16px !important;
+            /* 大きすぎたのを修正 */
             font-weight: bold !important;
-            padding: 15px 40px !important;
-            /* 余白を広げて指でタップしやすく */
-            border-radius: 12px !important;
+            padding: 10px 30px !important;
+            /* 横長になりすぎない余白 */
+            border-radius: 8px !important;
             background-color: #666666 !important;
             /* キャンセルらしいグレー */
             color: #ffffff !important;
@@ -89,41 +132,39 @@
             white-space: nowrap !important;
             /* 文字の折り返しを防ぐ */
         }
-        /* カスタムモーダル用スタイル */
-        .modal.hidden { display: none; }
-        .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 20000; }
-        .modal-content { background:#fff; padding:2rem; border-radius:12px; text-align:center; }
-        .large-btn { font-size:28px; padding:1rem 2rem; margin:0.5rem; border:none; border-radius:12px; background:#666; color:#fff; }
     </style>
 </head>
 
 <body>
     <canvas id="the_canvas_id"></canvas>
     <script>
-    // カスタムモーダルロジック
-    const modal = document.getElementById('file-modal');
-    const fileInput = document.getElementById('file-input');
-    const chooseBtn = document.getElementById('modal-choose');
-    const cancelBtn = document.getElementById('modal-cancel');
-
-    // 動的に生成される <input type="file"> のクリックを捕捉
-    document.addEventListener('click', (e) => {
-        if (e.target.matches('input[type="file"]')) {
-            e.preventDefault();
-            modal.classList.remove('hidden');
+        // ビューポートのリセット処理
+        function resetViewport() {
+            window.scrollTo(0, 0);
+            document.body.scrollTop = 0;
         }
-    });
 
-    // モーダルから実際のファイルピッカーを起動
-    chooseBtn.addEventListener('click', () => {
-        modal.classList.add('hidden');
-        fileInput.click();
-    });
+        // 入力終了時に強制的に位置を戻す
+        document.addEventListener('focusout', resetViewport);
+        document.addEventListener('blur', resetViewport);
 
-    // キャンセル
-    cancelBtn.addEventListener('click', () => {
-        modal.classList.add('hidden');
-    });
+        // iOSなどで user-scalable=no が無視される場合の対策
+        // ピンチズーム（マルチタッチ）を禁止
+        document.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) {
+                e.preventDefault();
+            }
+        }, { passive: false });
+
+        // ダブルタップズームを禁止
+        let lastTouchEnd = 0;
+        document.addEventListener('touchend', (e) => {
+            const now = Date.now();
+            if (now - lastTouchEnd <= 300) {
+                e.preventDefault();
+            }
+            lastTouchEnd = now;
+        }, false);
     </script>
 </body>
 

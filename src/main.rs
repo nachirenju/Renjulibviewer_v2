@@ -98,6 +98,10 @@ fn load_icon() -> egui::IconData {
 /// ネイティブ環境でのアプリケーション起動処理
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result<()> {
+    // コマンドライン引数を取得
+    let mut args = std::env::args().skip(1); // 0 番目は実行ファイル自身
+    let maybe_path = args.next();
+
     let icon = load_icon();
 
     let options = eframe::NativeOptions {
@@ -111,7 +115,16 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             let settings = setting::Settings::load();
             setup_custom_fonts(&cc.egui_ctx, &settings.font_path);
-            Ok(Box::new(RenjuApp::new_with_settings(settings)))
+
+            // アプリ本体を生成
+            let mut app = RenjuApp::new_with_settings(settings);
+
+            // 起動時にファイルが渡されていれば即読込
+            if let Some(path_str) = maybe_path {
+                app.load_file(std::path::Path::new(&path_str));
+            }
+
+            Ok(Box::new(app))
         }),
     )
 }
@@ -134,6 +147,20 @@ fn main() {
                 Box::new(|cc| {
                     let settings = setting::Settings::load();
                     setup_custom_fonts(&cc.egui_ctx, &settings.font_path);
+                    
+                    // スマホでの入力時ズーム対策: フォントサイズを16px相当以上に設定
+                    let mut style = (*cc.egui_ctx.style()).clone();
+                    style.text_styles = [
+                        (egui::TextStyle::Body, egui::FontId::new(16.0, egui::FontFamily::Proportional)),
+                        (egui::TextStyle::Button, egui::FontId::new(16.0, egui::FontFamily::Proportional)),
+                        (egui::TextStyle::Monospace, egui::FontId::new(16.0, egui::FontFamily::Monospace)),
+                        (egui::TextStyle::Heading, egui::FontId::new(18.0, egui::FontFamily::Proportional)),
+                    ].into();
+                    cc.egui_ctx.set_style(style);
+
+                    // ブラウザ側に「十分な大きさ」と認識させるためズームファクタを調整
+                    cc.egui_ctx.set_zoom_factor(1.1);
+
                     Ok(Box::new(RenjuApp::new_with_settings(settings)))
                 }),
             )
@@ -316,6 +343,13 @@ impl RenjuApp {
                 }
             }
         }
+    }
+
+    /// ファイルパスから拡張子を自動判定して読み込む
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_file(&mut self, path: &std::path::Path) {
+        let is_db = matches!(path.extension().and_then(|e| e.to_str()), Some("db"));
+        self.process_loaded_file(path, is_db);
     }
 
     /// ファイルパスからデータを読み込み、パースを行う

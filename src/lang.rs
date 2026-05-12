@@ -91,6 +91,7 @@ pub struct Tr {
     pub save_as_menu: &'static str,
     pub save_branch: &'static str,
     pub top_branch_highlight_count: &'static str,
+    pub last_move_color_label: &'static str,
 }
 
 pub fn get(lang: Language) -> &'static Tr {
@@ -155,6 +156,7 @@ static TR_JA: Tr = Tr {
     save_as_menu: "名前を付けて保存",
     save_branch: "分岐を保存",
     top_branch_highlight_count: "強調表示する上位候補数:",
+    last_move_color_label: "最新の着手番号の色:",
 };
 
 static TR_EN: Tr = Tr {
@@ -209,6 +211,7 @@ static TR_EN: Tr = Tr {
     save_as_menu: "Save As",
     save_branch: "Save Branch",
     top_branch_highlight_count: "Top branch highlight count:",
+    last_move_color_label: "Last move number color:",
 };
 
 static TR_ZH: Tr = Tr {
@@ -263,6 +266,7 @@ static TR_ZH: Tr = Tr {
     save_as_menu: "另存为",
     save_branch: "保存分支",
     top_branch_highlight_count: "高亮显示的前几位分支数:",
+    last_move_color_label: "最新着手的手数颜色:",
 };
 
 static TR_ZHT: Tr = Tr {
@@ -317,6 +321,7 @@ static TR_ZHT: Tr = Tr {
     save_as_menu: "另存為",
     save_branch: "儲存分支",
     top_branch_highlight_count: "高亮顯示的前幾位分支數:",
+    last_move_color_label: "最新着手的手數顏色:",
 };
 
 static TR_KO: Tr = Tr {
@@ -371,4 +376,5 @@ static TR_KO: Tr = Tr {
     save_as_menu: "다른 이름으로 저장",
     save_branch: "분기 저장",
     top_branch_highlight_count: "강조 표시할 상위 분기 수:",
+    last_move_color_label: "마지막 수의 숫자 색상:",
 };

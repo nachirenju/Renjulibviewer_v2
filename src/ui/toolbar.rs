@@ -25,8 +25,7 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         if let Some(path) = rfd::FileDialog::new().add_filter("Renju Files", &["lib", "db"]).pick_file() {
-                            let is_db = path.extension().and_then(|s| s.to_str()) == Some("db");
-                            app.process_loaded_file(&path, is_db);
+                            app.load_file(&path);
                         }
                     }
 

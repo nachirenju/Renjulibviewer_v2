@@ -153,6 +153,8 @@ struct SettingsData {
     pub show_branch_count: bool,
     #[serde(default = "default_top_branch_highlight_count")]
     pub top_branch_highlight_count: usize,
+    #[serde(default = "default_last_move_color")]
+    pub last_move_color: [f32; 3],
 }
 
 fn default_max_nodes() -> usize {
@@ -169,6 +171,10 @@ fn default_wasm_button_size() -> f32 {
 
 fn default_language() -> lang::Language {
     lang::Language::Japanese
+}
+
+fn default_last_move_color() -> [f32; 3] {
+    [1.0, 0.0, 0.0]
 }
 
 /// アプリケーション設定
@@ -196,6 +202,7 @@ pub struct Settings {
     pub show_branch_text: bool,
     pub show_branch_count: bool,
     pub top_branch_highlight_count: usize,
+    pub last_move_color: [f32; 3],
 }
 
 impl Default for Settings {
@@ -215,6 +222,7 @@ impl Default for Settings {
             show_branch_text: true,
             show_branch_count: true,
             top_branch_highlight_count: 3,
+            last_move_color: [1.0, 0.0, 0.0],
         }
     }
 }
@@ -264,6 +272,7 @@ impl Settings {
             show_branch_text: self.show_branch_text,
             show_branch_count: self.show_branch_count,
             top_branch_highlight_count: self.top_branch_highlight_count,
+            last_move_color: self.last_move_color,
         };
         
         if let Ok(json) = serde_json::to_string_pretty(&data) {
@@ -300,6 +309,7 @@ impl Settings {
             show_branch_text: data.show_branch_text,
             show_branch_count: data.show_branch_count,
             top_branch_highlight_count: data.top_branch_highlight_count,
+            last_move_color: data.last_move_color,
         }
     }
 
@@ -335,6 +345,13 @@ impl Settings {
                 });
                 ui.checkbox(&mut self.stone_shading, tr.stone_shading);
                 ui.checkbox(&mut self.show_numbers, tr.show_numbers);
+                if self.show_numbers {
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.label(tr.last_move_color_label);
+                        ui.color_edit_button_rgb(&mut self.last_move_color);
+                    });
+                }
 
                 ui.add_space(4.0);
                 ui.checkbox(&mut self.show_branches, tr.show_branches);

@@ -322,7 +322,17 @@ let font_id = egui::FontId::proportional(cell_size * 0.4);
                                     } else {
                                         move_number
                                     };
-                                    let t_color = if player == Player::Black { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                                    let t_color = if move_number == current_history.len() {
+                                        egui::Color32::from_rgb(
+                                            (app.settings.last_move_color[0] * 255.0) as u8,
+                                            (app.settings.last_move_color[1] * 255.0) as u8,
+                                            (app.settings.last_move_color[2] * 255.0) as u8,
+                                        )
+                                    } else if player == Player::Black {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        egui::Color32::BLACK
+                                    };
                                     painter.text(center, egui::Align2::CENTER_CENTER, display_num.to_string(), font_id.clone(), t_color);
                                 }
                             }
