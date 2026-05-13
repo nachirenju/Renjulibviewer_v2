@@ -239,6 +239,8 @@ pub struct RenjuApp {
     pub show_gif_setup: bool,
     pub gif_frames: Vec<image::RgbaImage>,
     pub show_about: bool,
+    pub show_new_game_confirm: bool,
+    pub copy_notification: Option<(String, web_time::Instant)>,
     #[cfg(target_arch = "wasm32")]
     pub wasm_dropped_file: Arc<Mutex<Option<(String, Vec<u8>)>>>,
 }
@@ -278,6 +280,8 @@ impl RenjuApp {
             show_gif_setup: false,
             gif_frames: Vec::new(),
             show_about: false,
+            show_new_game_confirm: false,
+            copy_notification: None,
             #[cfg(target_arch = "wasm32")]
             wasm_dropped_file: Arc::new(Mutex::new(None)),
         }
@@ -308,6 +312,7 @@ impl RenjuApp {
         self.ad_hoc_labels.clear();
         self.subtree_cache.borrow_mut().clear();
         self.export_state = ExportState::Idle;
+        self.show_new_game_confirm = false;
     }
 
     /// 読み込まれたバイトデータからパースを行い、アプリケーション状態を更新する
@@ -751,7 +756,11 @@ impl RenjuApp {
         }
     }
 
-    
+    /// コピー通知を表示する
+    pub fn trigger_copy_notification(&mut self) {
+        let tr = self.settings.tr();
+        self.copy_notification = Some((tr.copied_to_clipboard.to_string(), web_time::Instant::now()));
+    }
 }
 
 impl RenjuApp {
@@ -1036,6 +1045,8 @@ self.gif_frames.push(img_to_push);
         let is_vertical = screen_rect.width() < screen_rect.height() * 0.8;
 
         crate::ui::dialogs::draw_delete_confirm_dialog(self, ctx, &tr);
+        crate::ui::dialogs::draw_new_game_confirm_dialog(self, ctx, &tr);
+        crate::ui::dialogs::draw_copy_notification(self, ctx);
 
         crate::ui::dialogs::draw_text_edit_dialog(self, ctx);
 

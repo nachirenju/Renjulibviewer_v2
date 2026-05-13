@@ -126,6 +126,53 @@ pub fn draw_delete_confirm_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context
                 });
         }
     }
+ 
+pub fn draw_new_game_confirm_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::Tr) {
+        if app.show_new_game_confirm {
+            egui::Window::new(tr.new_game_confirm_title)
+                .collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(tr.new_game_confirm_msg);
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(tr.delete_yes).clicked() { app.new_game(); }
+                        if ui.button(tr.delete_no).clicked() { app.show_new_game_confirm = false; }
+                    });
+                });
+        }
+    }
+
+pub fn draw_copy_notification(app: &mut crate::RenjuApp, ctx: &egui::Context) {
+    if let Some((msg, start_time)) = &app.copy_notification {
+        let elapsed = start_time.elapsed().as_secs_f32();
+        if elapsed > 2.0 {
+            app.copy_notification = None;
+        } else {
+            let opacity = (1.0 - (elapsed - 1.5).max(0.0) / 0.5).clamp(0.0, 1.0);
+            let screen_rect = ctx.screen_rect();
+            let pos = egui::pos2(screen_rect.center().x, screen_rect.top() + 50.0);
+            
+            egui::Area::new("copy_notification".into())
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pos)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .show(ctx, |ui| {
+                    ui.scope(|ui| {
+                        ui.visuals_mut().window_fill = ui.visuals().window_fill.linear_multiply(opacity);
+                        ui.visuals_mut().widgets.noninteractive.fg_stroke.color = ui.visuals().widgets.noninteractive.fg_stroke.color.linear_multiply(opacity);
+                        
+                        egui::Frame::window(ui.style())
+                            .fill(egui::Color32::from_black_alpha(180).linear_multiply(opacity))
+                            .rounding(4.0)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(msg).color(egui::Color32::WHITE.linear_multiply(opacity)));
+                            });
+                    });
+                });
+            ctx.request_repaint();
+        }
+    }
+}
 
 pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
         if let Some(coord) = app.editing_coord {

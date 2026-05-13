@@ -21,7 +21,9 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
         let is_gif_capturing = matches!(app.export_state, ExportState::GifWaitCapture(_, _) | ExportState::GifCaptureRequested(_, _));
         let is_selecting_region = matches!(app.export_state, ExportState::SelectingRegion(_, _) | ExportState::GifSelectingRegion(_, _));
 
-        crate::ui::board::handle_board_input(app, ctx, &response, rect, cell_size, is_gif_capturing, is_selecting_region);
+        let panel_right_clicked = ui.max_rect().contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default()) 
+            && ctx.input(|i| i.pointer.secondary_clicked());
+        crate::ui::board::handle_board_input(app, ctx, &response, rect, cell_size, is_gif_capturing, is_selecting_region, panel_right_clicked);
 
         crate::ui::board::draw_grid_and_coords(app, &painter, rect, cell_size);
 
@@ -186,7 +188,7 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
             }
     }
 
-pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, response: &egui::Response, rect: egui::Rect, cell_size: f32, is_gif_capturing: bool, is_selecting_region: bool) {
+pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, response: &egui::Response, rect: egui::Rect, cell_size: f32, is_gif_capturing: bool, is_selecting_region: bool, panel_right_clicked: bool) {
             if !is_selecting_region && !is_gif_capturing && (response.clicked() || (response.drag_stopped() && response.dragged_by(egui::PointerButton::Primary))) {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let gx = ((pos.x - (rect.left() + cell_size)) / cell_size + 0.5).floor() as i32;
@@ -218,7 +220,7 @@ pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, respon
                 }
             }
 
-            let right_clicked = response.secondary_clicked();
+            let right_clicked = response.secondary_clicked() || panel_right_clicked;
             if right_clicked && !is_gif_capturing {
                 if app.is_db_mode { app.board.undo(); } else if let Some(idx) = app.current_node_idx {
                     if let Some(nodes) = &app.lib_nodes {

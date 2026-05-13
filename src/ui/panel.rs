@@ -32,7 +32,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                     if let Some(range) = char_range {
                         let byte_range = get_byte_range(&comment_text, range);
                         let selected = &comment_text[byte_range];
-                        if !selected.is_empty() { ui.output_mut(|o| o.copied_text = selected.to_string()); }
+                        if !selected.is_empty() { 
+                            ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
+                        }
                     }
                     ui.close_menu();
                 }
@@ -42,6 +45,7 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let selected = &comment_text[byte_range.clone()];
                         if !selected.is_empty() {
                             ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
                             comment_text.replace_range(byte_range, "");
                             let min_char = range.primary.index.min(range.secondary.index);
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_char))));
@@ -97,7 +101,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
             
             ui.horizontal(|ui| {
                 ui.heading(tr.notation);
-                if ui.button(tr.copy).clicked() { ui.output_mut(|o| o.copied_text = app.notation_text.clone()); }
+                if ui.button(tr.copy).clicked() { 
+                    ui.output_mut(|o| o.copied_text = app.notation_text.clone()); 
+                    app.trigger_copy_notification();
+                }
             });
             let n_id = ui.make_persistent_id("notation_text");
             let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), n_id).unwrap_or_default();
@@ -115,7 +122,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                     if let Some(range) = char_range {
                         let byte_range = get_byte_range(&app.notation_text, range);
                         let selected = &app.notation_text[byte_range];
-                        if !selected.is_empty() { ui.output_mut(|o| o.copied_text = selected.to_string()); }
+                        if !selected.is_empty() { 
+                            ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
+                        }
                     }
                     ui.close_menu();
                 }
@@ -125,6 +135,7 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let selected = &app.notation_text[byte_range.clone()];
                         if !selected.is_empty() {
                             ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
                             app.notation_text.replace_range(byte_range, "");
                             let min_char = range.primary.index.min(range.secondary.index);
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_char))));
@@ -164,7 +175,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
             
             ui.horizontal(|ui| {
                 ui.heading(tr.sgf);
-                if ui.button(tr.copy).clicked() { ui.output_mut(|o| o.copied_text = app.sgf_text.clone()); }
+                if ui.button(tr.copy).clicked() { 
+                    ui.output_mut(|o| o.copied_text = app.sgf_text.clone()); 
+                    app.trigger_copy_notification();
+                }
             });
             let s_id = ui.make_persistent_id("sgf_text");
             let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), s_id).unwrap_or_default();
@@ -182,7 +196,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                     if let Some(range) = char_range {
                         let byte_range = get_byte_range(&app.sgf_text, range);
                         let selected = &app.sgf_text[byte_range];
-                        if !selected.is_empty() { ui.output_mut(|o| o.copied_text = selected.to_string()); }
+                        if !selected.is_empty() { 
+                            ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
+                        }
                     }
                     ui.close_menu();
                 }
@@ -192,6 +209,7 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let selected = &app.sgf_text[byte_range.clone()];
                         if !selected.is_empty() {
                             ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
                             app.sgf_text.replace_range(byte_range, "");
                             let min_char = range.primary.index.min(range.secondary.index);
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_char))));
@@ -231,7 +249,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
             
             ui.horizontal(|ui| {
                 ui.heading(tr.portal_v1);
-                if ui.button(tr.copy).clicked() { ui.output_mut(|o| o.copied_text = app.portal_v1_text.clone()); }
+                if ui.button(tr.copy).clicked() { 
+                    ui.output_mut(|o| o.copied_text = app.portal_v1_text.clone()); 
+                    app.trigger_copy_notification();
+                }
             });
             let v1_id = ui.make_persistent_id("portal_v1_text");
             let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), v1_id).unwrap_or_default();
@@ -249,7 +270,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                     if let Some(range) = char_range {
                         let byte_range = get_byte_range(&app.portal_v1_text, range);
                         let selected = &app.portal_v1_text[byte_range];
-                        if !selected.is_empty() { ui.output_mut(|o| o.copied_text = selected.to_string()); }
+                        if !selected.is_empty() { 
+                            ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
+                        }
                     }
                     ui.close_menu();
                 }
@@ -259,6 +283,7 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let selected = &app.portal_v1_text[byte_range.clone()];
                         if !selected.is_empty() {
                             ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
                             app.portal_v1_text.replace_range(byte_range, "");
                             let min_char = range.primary.index.min(range.secondary.index);
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_char))));
@@ -298,7 +323,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
             
             ui.horizontal(|ui| {
                 ui.heading(tr.portal_v2);
-                if ui.button(tr.copy).clicked() { ui.output_mut(|o| o.copied_text = app.portal_v2_text.clone()); }
+                if ui.button(tr.copy).clicked() { 
+                    ui.output_mut(|o| o.copied_text = app.portal_v2_text.clone()); 
+                    app.trigger_copy_notification();
+                }
             });
             let v2_id = ui.make_persistent_id("portal_v2_text");
             let mut state = egui::widgets::text_edit::TextEditState::load(ui.ctx(), v2_id).unwrap_or_default();
@@ -316,7 +344,10 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                     if let Some(range) = char_range {
                         let byte_range = get_byte_range(&app.portal_v2_text, range);
                         let selected = &app.portal_v2_text[byte_range];
-                        if !selected.is_empty() { ui.output_mut(|o| o.copied_text = selected.to_string()); }
+                        if !selected.is_empty() { 
+                            ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
+                        }
                     }
                     ui.close_menu();
                 }
@@ -326,6 +357,7 @@ pub fn draw_comment_panel_content(app: &mut crate::RenjuApp, ui: &mut egui::Ui, 
                         let selected = &app.portal_v2_text[byte_range.clone()];
                         if !selected.is_empty() {
                             ui.output_mut(|o| o.copied_text = selected.to_string());
+                            app.trigger_copy_notification();
                             app.portal_v2_text.replace_range(byte_range, "");
                             let min_char = range.primary.index.min(range.secondary.index);
                             state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(min_char))));

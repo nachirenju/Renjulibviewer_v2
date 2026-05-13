@@ -158,7 +158,10 @@ struct SettingsData {
 }
 
 fn default_max_nodes() -> usize {
-    80_000_000
+    #[cfg(target_arch = "wasm32")]
+    return 80_000_000;
+    #[cfg(not(target_arch = "wasm32"))]
+    return usize::MAX;
 }
 
 fn default_font_path() -> String {
@@ -213,7 +216,7 @@ impl Default for Settings {
             ui_language: lang::Language::Japanese,
             stone_shading: true,
             show_numbers: true,
-            max_nodes: 80_000_000,
+            max_nodes: default_max_nodes(),
             font_path: "C:\\Windows\\Fonts\\msgothic.ttc".to_string(),
             show_window: false,
             available_fonts: get_system_fonts(),
@@ -403,7 +406,12 @@ impl Settings {
                 ui.heading(tr.encoding_section);
                 ui.horizontal(|ui| {
                     ui.label(tr.max_nodes_label);
-                    ui.add(egui::DragValue::new(&mut self.max_nodes).speed(10000).range(100000..=100_000_000));
+                    let range = if cfg!(target_arch = "wasm32") {
+                        100_000..=100_000_000
+                    } else {
+                        100_000..=usize::MAX
+                    };
+                    ui.add(egui::DragValue::new(&mut self.max_nodes).speed(10000).range(range));
                 });
                 ui.add_space(4.0);
                 ui.label(tr.encoding_label);

@@ -757,7 +757,7 @@ impl RenLibParser {
                 
                 for k in 0..8 {
                     unsafe {
-                        let h_p_sym = hashes_b.get_unchecked(k) ^ cell_hashes.get_unchecked(k).get_unchecked(color_to_remove as usize);
+                        let h_p_sym = hashes_b.get_unchecked(k) ^ cell_hashes.get_unchecked(color_to_remove as usize).get_unchecked(k);
                         if h_p_sym < min_h { min_h = h_p_sym; }
                     }
                 }
@@ -779,7 +779,7 @@ impl RenLibParser {
                     // 正しい親が見つかった場合のみリンク処理を行う
                     if valid_p_idx != NO_NODE {
                         let p_idx = valid_p_idx as usize;
-                        let target_hash = hashes_b[0] ^ cell_hashes[0][color_to_remove as usize];
+                        let target_hash = hashes_b[0] ^ cell_hashes[color_to_remove as usize][0];
 
                         let p_depth = nodes_ref[p_idx].depth();
                         let p_num_black = (p_depth as f32 / 2.0).ceil() as usize;

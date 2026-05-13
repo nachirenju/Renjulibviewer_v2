@@ -23,9 +23,10 @@ impl Board {
     fn update_hashes(&mut self, x: i8, y: i8, color_idx: usize) {
         let t_table = Zobrist::transformed_table();
         unsafe {
-            let cell_hashes = t_table.get_unchecked((y as usize * 15) + x as usize);
+            let cell_hashes = t_table.get_unchecked((y as usize * 15) + x as usize)
+                                     .get_unchecked(color_idx);
             for t in 0..8 {
-                *self.hashes.get_unchecked_mut(t) ^= *cell_hashes.get_unchecked(t).get_unchecked(color_idx);
+                *self.hashes.get_unchecked_mut(t) ^= *cell_hashes.get_unchecked(t);
             }
         }
     }

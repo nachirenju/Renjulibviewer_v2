@@ -92,6 +92,9 @@ pub struct Tr {
     pub save_branch: &'static str,
     pub top_branch_highlight_count: &'static str,
     pub last_move_color_label: &'static str,
+    pub new_game_confirm_title: &'static str,
+    pub new_game_confirm_msg: &'static str,
+    pub copied_to_clipboard: &'static str,
 }
 
 pub fn get(lang: Language) -> &'static Tr {
@@ -157,6 +160,9 @@ static TR_JA: Tr = Tr {
     save_branch: "分岐を保存",
     top_branch_highlight_count: "強調表示する上位候補数:",
     last_move_color_label: "最新の着手番号の色:",
+    new_game_confirm_title: "新規作成の確認",
+    new_game_confirm_msg: "現在の内容をリセットして新規作成しますか？",
+    copied_to_clipboard: "クリップボードにコピーしました",
 };
 
 static TR_EN: Tr = Tr {
@@ -212,6 +218,9 @@ static TR_EN: Tr = Tr {
     save_branch: "Save Branch",
     top_branch_highlight_count: "Top branch highlight count:",
     last_move_color_label: "Last move number color:",
+    new_game_confirm_title: "Confirm New Game",
+    new_game_confirm_msg: "Reset current content and start a new game?",
+    copied_to_clipboard: "Copied to clipboard",
 };
 
 static TR_ZH: Tr = Tr {
@@ -267,6 +276,9 @@ static TR_ZH: Tr = Tr {
     save_branch: "保存分支",
     top_branch_highlight_count: "高亮显示的前几位分支数:",
     last_move_color_label: "最新着手的手数颜色:",
+    new_game_confirm_title: "确认新建",
+    new_game_confirm_msg: "确定要重置当前内容并新建吗？",
+    copied_to_clipboard: "已复制到剪贴板",
 };
 
 static TR_ZHT: Tr = Tr {
@@ -322,6 +334,9 @@ static TR_ZHT: Tr = Tr {
     save_branch: "儲存分支",
     top_branch_highlight_count: "高亮顯示的前幾位分支數:",
     last_move_color_label: "最新着手的手數顏色:",
+    new_game_confirm_title: "確認新增",
+    new_game_confirm_msg: "確定要重設目前內容並新增嗎？",
+    copied_to_clipboard: "已複製到剪貼簿",
 };
 
 static TR_KO: Tr = Tr {
@@ -377,4 +392,7 @@ static TR_KO: Tr = Tr {
     save_branch: "분기 저장",
     top_branch_highlight_count: "강조 표시할 상위 분기 수:",
     last_move_color_label: "마지막 수의 숫자 색상:",
+    new_game_confirm_title: "새 게임 확인",
+    new_game_confirm_msg: "현재 내용을 초기화하고 새 게임을 시작하시겠습니까?",
+    copied_to_clipboard: "클립보드에 복사되었습니다",
 };
