@@ -1,4 +1,3 @@
-// アプリケーションのエントリポイント、状態管理、およびメインUIループを制御する
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;

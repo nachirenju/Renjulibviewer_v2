@@ -56,11 +56,15 @@ impl<R: BufRead> ParserContext<R> {
     }
 
     // 指定された長さのバイトスライスを取得する
+    // バッファが拡大するときのみ resize（ゼロクリア）し、縮小・同サイズの場合は長さを変更せず
+    // read_exact が [..len] を完全に上書きするため古いデータが混ざることはない
     #[inline(always)]
     fn read_slice(&mut self, len: usize) -> io::Result<&[u8]> {
-        self.buffer.resize(len, 0);
-        self.reader.read_exact(&mut self.buffer)?;
-        Ok(&self.buffer)
+        if self.buffer.len() < len {
+            self.buffer.resize(len, 0);
+        }
+        self.reader.read_exact(&mut self.buffer[..len])?;
+        Ok(&self.buffer[..len])
     }
 
 }
@@ -120,90 +124,177 @@ impl RenLibParser {
 
 
 
-    // .lib ファイル専用：スライスから直接ゼロコピーでノードを読み込む
-    #[inline(always)]
-    fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<NodeInfo> {
-        if self.nodes.len() >= self.max_nodes || *offset + 1 >= data.len() {
-            return None;
-        }
+    // .lib のバイナリデータから「1手分の情報」を読み取り、
+// self.nodes にノードを追加する処理。
+// offset は「今どこまで読んだか」を示す読み取り位置。
+#[inline(always)]
+fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<NodeInfo> {
 
-        let move_byte = data[*offset];
-        let flag = data[*offset + 1];
-        *offset += 2;
-
-        let (x, y) = if move_byte == 0 {
-            (-1, -1) 
-        } else {
-            (( (move_byte & 0x0f) as i8 - 1), ( (move_byte >> 4) as i8))
-        };
-
-        if (flag & MASK_TEXT) != 0 { 
-            *offset += 2; // テキストフラグ用パディングスキップ
-        }
-
-        // ゼロコピーで文字列（ヌル終端）を抽出するヘルパー関数
-        let mut extract_string = || -> u32 {
-            let start = *offset;
-            // イテレータを使って一気にヌル文字を探す（SIMD最適化）
-            if let Some(null_pos) = data[*offset..].iter().position(|&b| b == 0) {
-                *offset += null_pos;
-            } else {
-                *offset = data.len();
-            }
-            let str_len = *offset - start;
-            // ゼロコピーでスライスを切り出す
-            let slice = &data[start..*offset];
-            
-            if *offset < data.len() { *offset += 1; } // ヌル文字をスキップ
-            // 2バイト境界に合わせるためのパディング
-            if (str_len + 1) % 2 != 0 {
-                if *offset < data.len() { *offset += 1; }
-            }
-            
-            if slice.is_empty() { NO_TEXT } else { self.text_pool.get_or_insert(slice) }
-        };
-
-        let comment_id = if (flag & MASK_COMMENT) != 0 { extract_string() } else { NO_TEXT };
-        let text_id = if (flag & MASK_TEXT) != 0 { extract_string() } else { NO_TEXT };
-
-        let idx = self.nodes.len();
-        self.nodes.push(RenLibNode::new(x, y, NO_NODE, NO_NODE, NO_NODE, 0, 0));
-
-        let texts = if comment_id != NO_TEXT || text_id != NO_TEXT {
-            let cid = std::cmp::min(comment_id, 0xFFFF);
-            let tid = std::cmp::min(text_id, 0xFFFF);
-            cid | (tid << 16)
-        } else {
-            0xFFFF | (0xFFFF << 16)
-        };
-        self.node_texts.push(texts);
-
-        Some(NodeInfo {
-            idx,
-            has_child: (flag & MASK_NOCHILD) == 0,
-            has_sibling: (flag & MASK_SIBLING) != 0,
-        })
+    // ノード数制限を超えた、または残りデータ不足なら終了
+    if self.nodes.len() >= self.max_nodes || *offset + 1 >= data.len() {
+        return None;
     }
 
-    // .libファイルの全データから木構造を構築する
+    // 1バイト目 = 着手座標
+    // 2バイト目 = 子ノード有無・コメント有無などのフラグ
+    let move_byte = data[*offset];
+    let flag = data[*offset + 1];
+    *offset += 2;
+
+    // move_byte を x,y 座標へ変換
+    // move_byte == 0 は仮想ルートノード（盤面に石が存在しない）
+    let (x, y) = if move_byte == 0 {
+        (-1, -1)
+    } else {
+        (
+            ((move_byte & 0x0f) as i8 - 1),
+            ((move_byte >> 4) as i8),
+        )
+    };
+
+    // テキストフラグが立っている場合、
+    // .lib仕様上2バイトのパディングが入るためスキップ
+    if (flag & MASK_TEXT) != 0 {
+        *offset += 2;
+    }
+
+    // コメント文字列・ラベル文字列を取り出す処理
+    // .lib内の文字列は文字列データ＋0(null終端文字)で管理されている:
+    // 新しく文字列メモリをコピーせず、元dataの一部(slice)を直接参照する。コピーしないことによってメモリ負担を軽くする、
+    let mut extract_string = || -> u32 {
+
+        // 現在位置を記録
+        let start = *offset;
+
+        // null文字(0)まで探す
+        // iterator を使うことで内部的にSIMD最適化される場合がある
+        if let Some(null_pos) = data[*offset..].iter().position(|&b| b == 0) {
+            *offset += null_pos;
+        } else {
+            // null終端が見つからない異常データ時は末尾まで進める
+            *offset = data.len();
+        }
+
+        let str_len = *offset - start;
+
+        // data本体をコピーせず slice として切り出す
+        let slice = &data[start..*offset];
+
+        // null文字を読み飛ばす
+        if *offset < data.len() {
+            *offset += 1;
+        }
+
+        // .lib は2バイト境界へ揃える仕様のため、
+        // 奇数長なら追加1バイトをスキップ
+        if (str_len + 1) % 2 != 0 {
+            if *offset < data.len() {
+                *offset += 1;
+            }
+        }
+
+        // 空文字なら NO_TEXT,それ以外は text_pool に登録しID化
+        // text_pool:同じ文字列を共有しメモリ重複を防ぐ仕組み
+        if slice.is_empty() {
+            NO_TEXT
+        } else {
+            self.text_pool.get_or_insert(slice)
+        }
+    };
+
+    // コメント文字列を読み込む
+    let comment_id =
+        if (flag & MASK_COMMENT) != 0 {
+            extract_string()
+        } else {
+            NO_TEXT
+        };
+
+    // ラベル文字列を読み込む
+    let text_id =
+        if (flag & MASK_TEXT) != 0 {
+            extract_string()
+        } else {
+            NO_TEXT
+        };
+
+    // 新ノードのindex
+    let idx = self.nodes.len();
+
+    // ノード本体を追加
+    // parent/child/sibling はまだ未接続なので NO_NODE
+    // hash/depth も parse_all 側で後から計算する
+    self.nodes.push(
+        RenLibNode::new(
+            x,
+            y,
+            NO_NODE,
+            NO_NODE,
+            NO_NODE,
+            0,
+            0,
+        )
+    );
+
+    // comment_id と text_idという二つの値を u32型の一つの値へ圧縮して保存
+    // 下位16bit = comment
+    // 上位16bit = text
+    let texts =
+        if comment_id != NO_TEXT || text_id != NO_TEXT {
+
+            // 16bit超過防止
+            let cid = std::cmp::min(comment_id, 0xFFFF);
+            let tid = std::cmp::min(text_id, 0xFFFF);
+
+            cid | (tid << 16)
+
+        } else {
+
+            // コメント・テキスト両方無しを表す特殊値。
+            // 下位16bit(comment)、上位16bit(text) の両方へ
+            // 0xFFFF (=65535, 16bit全部1) を格納。
+            0xFFFF | (0xFFFF << 16)
+        };
+
+    self.node_texts.push(texts);
+
+    // parse_all 側へ返す情報
+    //
+    // has_child:
+    // 次に子ノード読み込みが必要か
+    //
+    // has_sibling:
+    // 帰り時に兄弟ノード読み込みが必要か
+    Some(NodeInfo {
+        idx,
+        has_child: (flag & MASK_NOCHILD) == 0,
+        has_sibling: (flag & MASK_SIBLING) != 0,
+    })
+}
+
+    // 01で構成されるバイナリデータで記された局面の木構造をメモリへ復元する
     pub fn parse_all(&mut self, data: &[u8], board: &mut Board) -> io::Result<()> {
         if data.len() < 20 { return Ok(()); } // ヘッダーサイズ未満は弾く
-        let mut offset = 20; // ヘッダー(20バイト)をスキップして開始
+        let mut offset = 20; // offsetとは今何バイト目を読んでいるかという目印。.libにおいて最初の20バイトはヘッダー、棋譜に関与しない情報なので除外
         
-        // 1ノード平均3バイトで見積もり
+        // 1ノード平均3バイトで見積もり、読み込むファイル分のメモリを確保
         let estimated_nodes = (data.len() / 3).max(1000).min(self.max_nodes);
-        
+
+        //いま読み込もうとしているファイルの前に残っていた情報をリセットし、読み込まれた分のメモリを追加で確保する
         self.nodes.clear();
         self.node_texts.clear();
-        self.hash_table.clear(); // ここでの hash_table.reserve は削除
+        self.hash_table.clear(); 
 
         self.nodes.reserve(estimated_nodes);
         self.node_texts.reserve(estimated_nodes);
 
-        // ハッシュを一時的に溜め込むフラットな配列
+        // ハッシュと番号が組になったなどオブジェクト(hash,idx)=例(A,01) (C,03), (B,04)などを(A,01,B,04...)という一直線の配列に組み直しキャッシュミスを防止
+        //ハッシュについてやってることを端的に言うと、CPUが処理しやすいようにデータを整理する
         let mut flat_hashes = Vec::with_capacity(estimated_nodes);
 
-        self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));
+        
+        //初期盤面＝ルートノードの作成。-1,-1は盤面に石がない状態。
+        self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));//参考：RenlibNode::new(x(i8),y(i8),親(u32),子,(u32),兄弟(u32),hash(u64),depth(u32)　括弧内は型 node.rs内のimpl Renlibnodeも参照
         self.node_texts.push(0xFFFF | (0xFFFF << 16)); // ルートノード用のテキスト初期値を追加
 
         // ルートノードの読み込みを試行する
@@ -232,28 +323,52 @@ impl RenLibParser {
             }
         }
 
+        //初期盤面＝0手目を親とし、初手が打たれた状態を子としてツリーを構築
         self.nodes[0].child = root_info.idx as u32;
         self.nodes[root_info.idx].parent = 0;
 
-        let mut stack = Vec::with_capacity(1024);
+        // DFS＝深さ優先探索を手動stackで実装。
+        // 再帰呼び出しや盤面コピーを避け、
+        // make_move / undo_move により1枚の盤面を共有して探索する。これによりメモリ負担を軽減する。
+
+        let mut stack = Vec::with_capacity(225);// DFSの探索状態(StackFrame)をVecの連続メモリ上で管理（あるノードにおける探索やることリスト）。
+                                                // stack は現在の探索経路のみを保持する一時領域。
+                                                // 連珠は最大225手のため、探索深さも最大225となる
+
+        //やることリストのメモ内容：現在の局面、ステージ(行きor帰り)、子ノード及び兄弟ノードの有無、いまいるノードで石を置いたか：石を置く＝奥のノードに行く。帰りの時に石を取り除く
         stack.push(StackFrame {
             node_idx: root_info.idx, stage: 0,
             has_child: root_info.has_child, has_sibling: root_info.has_sibling, made_move: false,
         });
 
-        // スタックが空になるまで深さ優先でノードを評価する
-        while let Some(mut frame) = stack.pop() {
-            let curr_idx = frame.node_idx;
-            let stage = frame.stage;
-            let has_child = frame.has_child;
-            let has_sibling = frame.has_sibling;
+        /*全体の流れのイメージは
+        1,初手（stage 0＝行きの印)
+        2,記録、stage 1＝帰りの印に書き換えしてスタックの一番上に積む
+        3,次の手＝子ノードの行きをスタックの一番上に積む
+        上記を繰り返して一番奥まで行き、奥までいったらstage 1の印を利用して戻ってくる
 
-            // 行きがけ（stage 0）のノード処理を行う
+        ※stack は現在の探索経路だけを保持する一時領域。
+        木構造本体は self.nodes 側へ保存される。
+        DFS順に.libを読み進めながら、
+        木構造(self.nodes)と局面検索用ハッシュを構築する。*/
+
+        
+        
+        
+
+        // スタックを空にする＝一番奥のノードまで行き返ってくるまでの処理
+        while let Some(mut frame) = stack.pop() {
+            let curr_idx = frame.node_idx;//現在の局面
+            let stage = frame.stage;//行きか帰りか
+            let has_child = frame.has_child;//子ノードがあるか
+            let has_sibling = frame.has_sibling;//兄弟ノードがあるか
+
+            // 行き（stage 0）の処理、この段階では一番奥のノードまで到達できていない
             if stage == 0 {
                 let px = self.nodes[curr_idx].x();
                 let py = self.nodes[curr_idx].y();
 
-                // 座標が盤面内に収まり、かつ空きマスであるか判定する
+                // is_validは座標が盤面内に収まり、かつ空きマスであるか判定する、つまり合法手かどうかの判定
                 let is_valid = px < 0 || {
                     // 座標が0〜14の範囲内かチェックする
                     if px >= 0 && px < 15 && py >= 0 && py < 15 {
@@ -265,23 +380,27 @@ impl RenLibParser {
                 };
                 
                 let mut applied = false;
-                // 着手が有効であれば盤面に適用し、状態を記録する
+                
+
+                // 合法局面として盤面状態を更新し、ハッシュ・深さを確定
                 if is_valid {
                     board.make_move(px, py);
-                    applied = true;
+                    applied = true;//帰ってくるときのための目印
+                    
+                    
                     let hash = board.get_canonical_hash();
                     self.nodes[curr_idx].hash = hash;
                     self.nodes[curr_idx].set_depth(board.move_count as u8); 
                     
-                    // HashMap ではなくフラットな配列に記録
+                    
                     flat_hashes.push((hash, curr_idx as u32));
                 }
 
-                frame.stage = 1;
-                frame.made_move = applied;
-                stack.push(frame);
+                frame.stage = 1;//行きの処理が終わったので帰りの処理をするときのためにステージ1に書き換える
+                frame.made_move = applied;//着手が行なわれたという記録、戻ってくるときの判定に使う
+                stack.push(frame);//リストの一番上に追加
 
-                // 子ノードが存在する場合はパースしてスタックに積む
+                // 一番奥に行くことを優先する
                 if has_child {
                     if let Some(child_info) = self.read_node_from_slice(data, &mut offset) {
                         self.nodes[child_info.idx].parent = curr_idx as u32;
@@ -292,15 +411,16 @@ impl RenLibParser {
                         });
                     }
                 }
-            // 帰りがけ（stage 1）のノード処理を行う
+
+            // 帰り（stage 1）の処理を行う
             } else if stage == 1 {
-                // 行きがけで着手を適用していた場合は元に戻す
+                // 行きで着手を適用していた場合は元に戻す
                 if frame.made_move {
                     let px = self.nodes[curr_idx].x();
                     let py = self.nodes[curr_idx].y();
                     board.undo_move(px, py);
                 }
-                // 兄弟ノードが存在する場合はパースしてスタックに積む
+                // 兄弟ノードが存在する場合はパースしてリストに積む
                 if has_sibling {
                     if let Some(sib_info) = self.read_node_from_slice(data, &mut offset) {
                         let p_idx = self.nodes[curr_idx].parent;
@@ -316,6 +436,7 @@ impl RenLibParser {
         } // while let Some(mut frame) = stack.pop() の終了
 
         // ループ終了後に一気に並列ソート＆重複排除して HashMap を構築
+        //イメージとして、例えば(hash.index)が(A,05),(B,03),(C.06)のようにメモリに一直線に並ぶ状態を作る
         #[cfg(not(target_arch = "wasm32"))]
         {
             flat_hashes.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
@@ -325,10 +446,10 @@ impl RenLibParser {
             flat_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
         }
 
-        // 最初の要素（＝idxが最も大きい最新のノード）だけを残して重複を排除
+        // 重複削除＝同一局面ハッシュを一つに圧縮
         flat_hashes.dedup_by_key(|k| k.0);
         
-        // メモリのピーク消費を抑えるため、余分なキャパシティを解放
+        // 削除して空いた分のメモリを開放する
         flat_hashes.shrink_to_fit();
 
         // 重複排除されて小さくなったサイズで無駄なく確保して一気に挿入
@@ -445,7 +566,7 @@ impl RenLibParser {
                 
                 // 石データが存在する場合、盤面に配置して状態を構築する
                 if num_stones >= 0 {
-                    let num_black = (num_stones as f32 / 2.0).ceil() as usize;
+                    let num_black = (num_stones as usize + 1) / 2;
                     // 黒石を指定座標に順次配置する
                     for k in 0..num_black {
                         let bx = key_buffer[3 + k * 2] as i8;
@@ -457,7 +578,7 @@ impl RenLibParser {
                         }
                     }
                     
-                    let num_white = (num_stones as f32 / 2.0).floor() as usize;
+                    let num_white = num_stones as usize / 2;
                     // 白石を指定座標に順次配置する
                     for k in 0..num_white {
                         let wx = key_buffer[3 + num_black * 2 + k * 2] as i8;
@@ -642,7 +763,12 @@ impl RenLibParser {
             }
 
             let absolute_t = self.reconstruct_tree_optimized(&node_stones_data, &node_stones_index, &hash_nexts);
-            
+
+            // 案1：reconstruct完了後、不要になった巨大な一時配列を即座に解放しピークメモリを削減する
+            drop(node_stones_data);
+            drop(node_stones_index);
+            drop(hash_nexts);
+
             // 1. 親インデックス順にソートする (unstableソートで十分かつ高速)
             all_btxt.sort_unstable_by_key(|&(p_idx, ..)| p_idx);
 
@@ -691,6 +817,15 @@ impl RenLibParser {
                 }
             }
 
+            // 追加B：all_btxt処理完了後、不要になった対称変換テーブルとBTXTリストを解放する
+            drop(absolute_t);
+            drop(all_btxt);
+
+            // 追加A：未使用の余剰キャパシティを解放し、常駐メモリを圧縮する
+            self.hash_table.shrink_to_fit();
+            self.nodes.shrink_to_fit();
+            self.node_texts.shrink_to_fit();
+
         Ok(())
     }
 
@@ -726,7 +861,7 @@ impl RenLibParser {
                 &[]
             };
 
-            let num_black_total = (depth_b as f32 / 2.0).ceil() as usize;
+            let num_black_total = (depth_b as usize + 1) / 2;
             let mut temp_board = Board::new();
             // 自身の石をすべて盤面に配置してハッシュリストを生成する
             for (k, &val) in stones_b.iter().enumerate() {
@@ -738,7 +873,7 @@ impl RenLibParser {
             let hashes_b = temp_board.hashes;
             
             let color_to_remove = (depth_b - 1) % 2;
-            let num_black = (depth_b as f32 / 2.0).ceil() as usize;
+            let num_black = (depth_b as usize + 1) / 2;
 
             // 直前に置かれた可能性のある石（同色）のリストを決定する
             let stones_to_check = if color_to_remove == 0 {
@@ -782,11 +917,15 @@ impl RenLibParser {
                         let target_hash = hashes_b[0] ^ cell_hashes[color_to_remove as usize][0];
 
                         let p_depth = nodes_ref[p_idx].depth();
-                        let p_num_black = (p_depth as f32 / 2.0).ceil() as usize;
+                        let p_num_black = (p_depth as usize + 1) / 2;
                         let p_start = node_stones_index[p_idx] as usize;
                         let p_end = if p_idx + 1 < node_stones_index.len() { node_stones_index[p_idx + 1] as usize } else { node_stones_data.len() };
-                        let stones_p = &node_stones_data[p_start..p_end];
-                        
+                        let stones_p = if p_start < p_end && p_end <= node_stones_data.len() {
+                            &node_stones_data[p_start..p_end]
+                        } else {
+                            &[]
+                        };
+
                         let mut temp_board_p = Board::new();
                         for (k, &val) in stones_p.iter().enumerate() {
                             let sx = (val % 15) as i8;
