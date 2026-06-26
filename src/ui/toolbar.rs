@@ -64,6 +64,7 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                 if ui.button(egui::RichText::new(tr.undo_all).size(btn_size)).on_hover_text(tr.undo_all_tooltip).clicked() { app.reset_to_root(); }
                 
                 if ui.button(egui::RichText::new(tr.undo_one).size(btn_size)).on_hover_text(tr.undo_one_tooltip).clicked() {
+                    let before_len = app.board.history.len();
                     if app.is_db_mode { app.board.undo(); } else if let Some(nodes) = &app.lib_nodes {
                         if let Some(idx) = app.current_node_idx {
                             let node = &nodes[idx];
@@ -74,6 +75,9 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                             }
                         }
                     } else { app.board.undo(); }
+                    if app.board.history.len() != before_len {
+                        app.clear_vcf_solution();
+                    }
                 }
                 
                 if ui.button(egui::RichText::new(tr.redo_one).size(btn_size)).on_hover_text(tr.redo_one_tooltip).clicked() {
@@ -116,6 +120,24 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
 
                 if ui.button(egui::RichText::new("ℹ️").size(btn_size)).on_hover_text("About").clicked() {
                     app.show_about = true;
+                }
+            });
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let (btn_size, spacing) = if cfg!(target_arch = "wasm32") {
+                    (app.settings.wasm_button_size * 0.8, app.settings.wasm_button_size * 0.35)
+                } else { (16.0, 8.0) };
+
+                ui.spacing_mut().item_spacing.x = spacing;
+                if ui.add_enabled(!app.vcf_solving, egui::Button::new(egui::RichText::new(tr.vcf).size(btn_size).strong())).clicked() {
+                    app.start_vcf_search();
+                }
+
+                if app.vcf_solving {
+                    ui.spinner();
+                    ui.label(egui::RichText::new(tr.vcf_solving).size(btn_size));
+                } else if !app.vcf_status.is_empty() {
+                    ui.label(egui::RichText::new(&app.vcf_status).size(btn_size));
                 }
             });
             ui.add_space(4.0);

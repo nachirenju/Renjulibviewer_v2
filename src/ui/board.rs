@@ -4,6 +4,7 @@ use crate::ExportState;
 use crate::board::SIZE;
 use crate::core::{HashBoard, NO_NODE, NO_TEXT};
 use crate::board::Player;
+use crate::vcf::solver::{BLACK, WHITE};
 
 pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut egui::Ui) {
         if app.settings.show_settings_window(ctx) { crate::setup_custom_fonts(ctx, &app.settings.font_path); }
@@ -97,6 +98,13 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
             crate::ui::board::draw_branches(app, ctx, &painter, rect, cell_size, current_history, target_idx);
         }
 
+        if !is_gif_capturing {
+            if app.settings.show_forbidden_points {
+                crate::ui::board::draw_forbidden_points(app, &painter, rect, cell_size);
+            }
+            crate::ui::board::draw_vcf_solution(app, &painter, rect, cell_size);
+        }
+
             // ==========================================
             // キャプチャの処理
             // ==========================================
@@ -188,6 +196,41 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
             }
     }
 
+pub fn draw_forbidden_points(app: &mut crate::RenjuApp, painter: &egui::Painter, rect: egui::Rect, cell_size: f32) {
+            let points = app.cached_forbidden_points();
+            let stroke = egui::Stroke::new((cell_size * 0.08).max(2.0), egui::Color32::RED);
+            let radius = cell_size * 0.24;
+            for &idx in points {
+                let x = idx % SIZE;
+                let y = idx / SIZE;
+                let center = egui::pos2(rect.left() + cell_size * (x as f32 + 1.0), rect.top() + cell_size * (y as f32 + 1.0));
+                painter.line_segment([center + egui::vec2(-radius, -radius), center + egui::vec2(radius, radius)], stroke);
+                painter.line_segment([center + egui::vec2(-radius, radius), center + egui::vec2(radius, -radius)], stroke);
+            }
+    }
+
+pub fn draw_vcf_solution(app: &crate::RenjuApp, painter: &egui::Painter, rect: egui::Rect, cell_size: f32) {
+            if app.vcf_solution.is_empty() {
+                return;
+            }
+            let font_id = egui::FontId::proportional(cell_size * 0.28);
+            for (i, mv) in app.vcf_solution.iter().enumerate() {
+                let center = egui::pos2(rect.left() + cell_size * (mv.x as f32 + 1.0), rect.top() + cell_size * (mv.y as f32 + 1.0));
+                let fill = if mv.color == BLACK {
+                    egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180)
+                } else if mv.color == WHITE {
+                    egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(160, 160, 160, 180)
+                };
+                let text_color = if mv.color == BLACK { egui::Color32::WHITE } else { egui::Color32::BLACK };
+                let radius = cell_size * 0.4;
+                painter.circle_filled(center, radius, fill);
+                painter.circle_stroke(center, radius, (1.0, egui::Color32::BLACK));
+                painter.text(center, egui::Align2::CENTER_CENTER, (i + 1).to_string(), font_id.clone(), text_color);
+            }
+    }
+
 pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, response: &egui::Response, rect: egui::Rect, cell_size: f32, is_gif_capturing: bool, is_selecting_region: bool, panel_right_clicked: bool) {
             if !is_selecting_region && !is_gif_capturing && (response.clicked() || (response.drag_stopped() && response.dragged_by(egui::PointerButton::Primary))) {
                 if let Some(pos) = response.interact_pointer_pos() {
@@ -222,6 +265,7 @@ pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, respon
 
             let right_clicked = response.secondary_clicked() || panel_right_clicked;
             if right_clicked && !is_gif_capturing {
+                let before_len = app.board.history.len();
                 if app.is_db_mode { app.board.undo(); } else if let Some(idx) = app.current_node_idx {
                     if let Some(nodes) = &app.lib_nodes {
                         let p_idx = nodes[idx].parent;
@@ -230,6 +274,9 @@ pub fn handle_board_input(app: &mut crate::RenjuApp, ctx: &egui::Context, respon
                             app.current_node_idx = Some(p_idx as usize);
                         }
                     }
+                }
+                if app.board.history.len() != before_len {
+                    app.clear_vcf_solution();
                 }
             }
 

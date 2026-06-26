@@ -95,6 +95,15 @@ pub struct Tr {
     pub new_game_confirm_title: &'static str,
     pub new_game_confirm_msg: &'static str,
     pub copied_to_clipboard: &'static str,
+    pub vcf: &'static str,
+    pub vcf_shortest: &'static str,
+    pub vcf_long: &'static str,
+    pub vcf_solving: &'static str,
+    pub vcf_section: &'static str,
+    pub show_forbidden_points: &'static str,
+    pub vcf_mode: &'static str,
+    pub vcf_depth: &'static str,
+    pub vcf_timeout: &'static str,
 }
 
 pub fn get(lang: Language) -> &'static Tr {
@@ -163,6 +172,15 @@ static TR_JA: Tr = Tr {
     new_game_confirm_title: "新規作成の確認",
     new_game_confirm_msg: "現在の内容をリセットして新規作成しますか？",
     copied_to_clipboard: "クリップボードにコピーしました",
+    vcf: "VCF",
+    vcf_shortest: "四追い(最短)",
+    vcf_long: "四追い(長手数)",
+    vcf_solving: "探索中",
+    vcf_section: "VCF / 禁手",
+    show_forbidden_points: "黒番の禁手を赤いXで表示",
+    vcf_mode: "探索方式:",
+    vcf_depth: "探索深さ:",
+    vcf_timeout: "思考時間(秒):",
 };
 
 static TR_EN: Tr = Tr {
@@ -221,6 +239,15 @@ static TR_EN: Tr = Tr {
     new_game_confirm_title: "Confirm New Game",
     new_game_confirm_msg: "Reset current content and start a new game?",
     copied_to_clipboard: "Copied to clipboard",
+    vcf: "VCF",
+    vcf_shortest: "VCF (shortest)",
+    vcf_long: "VCF (long)",
+    vcf_solving: "Solving",
+    vcf_section: "VCF / Forbidden",
+    show_forbidden_points: "Show forbidden black moves with red X",
+    vcf_mode: "Search mode:",
+    vcf_depth: "Search depth:",
+    vcf_timeout: "Time limit (sec):",
 };
 
 static TR_ZH: Tr = Tr {
@@ -279,6 +306,15 @@ static TR_ZH: Tr = Tr {
     new_game_confirm_title: "确认新建",
     new_game_confirm_msg: "确定要重置当前内容并新建吗？",
     copied_to_clipboard: "已复制到剪贴板",
+    vcf: "VCF",
+    vcf_shortest: "四追(最短)",
+    vcf_long: "四追(长手数)",
+    vcf_solving: "搜索中",
+    vcf_section: "VCF / 禁手",
+    show_forbidden_points: "用红色X显示黑方禁手",
+    vcf_mode: "搜索方式:",
+    vcf_depth: "搜索深度:",
+    vcf_timeout: "思考时间(秒):",
 };
 
 static TR_ZHT: Tr = Tr {
@@ -337,6 +373,15 @@ static TR_ZHT: Tr = Tr {
     new_game_confirm_title: "確認新增",
     new_game_confirm_msg: "確定要重設目前內容並新增嗎？",
     copied_to_clipboard: "已複製到剪貼簿",
+    vcf: "VCF",
+    vcf_shortest: "四追(最短)",
+    vcf_long: "四追(長手數)",
+    vcf_solving: "搜尋中",
+    vcf_section: "VCF / 禁手",
+    show_forbidden_points: "以紅色X顯示黑方禁手",
+    vcf_mode: "搜尋方式:",
+    vcf_depth: "搜尋深度:",
+    vcf_timeout: "思考時間(秒):",
 };
 
 static TR_KO: Tr = Tr {
@@ -395,4 +440,13 @@ static TR_KO: Tr = Tr {
     new_game_confirm_title: "새 게임 확인",
     new_game_confirm_msg: "현재 내용을 초기화하고 새 게임을 시작하시겠습니까?",
     copied_to_clipboard: "클립보드에 복사되었습니다",
+    vcf: "VCF",
+    vcf_shortest: "VCF(최단)",
+    vcf_long: "VCF(장수순)",
+    vcf_solving: "탐색 중",
+    vcf_section: "VCF / 금수",
+    show_forbidden_points: "흑 금수를 빨간 X로 표시",
+    vcf_mode: "탐색 방식:",
+    vcf_depth: "탐색 깊이:",
+    vcf_timeout: "제한 시간(초):",
 };

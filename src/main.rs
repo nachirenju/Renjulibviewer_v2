@@ -2,6 +2,12 @@
 
 use eframe::egui;
 #[cfg(target_arch = "wasm32")]
+use serde::{Deserialize, Serialize};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::closure::Closure;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
@@ -15,6 +21,7 @@ mod io;
 mod setting; 
 mod lang; 
 mod exportkifu;
+mod vcf;
 
 use board::Board;
 use rustc_hash::FxHashMap;
@@ -22,6 +29,179 @@ use crate::core::node::{RenLibNode, TextPool, NO_NODE, NO_TEXT};
 use crate::core::hash_board::Board as HashBoard;
 use crate::io::parser::RenLibParser;
 use crate::io::writer::RenLibWriter;
+use crate::vcf::model::BOARD_CELLS;
+use crate::vcf::solver::{BLACK, Move as VcfMove, SearchMode, SolveOutcome, Solver, side_to_move};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::Receiver;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(inline_js = r#"
+export function isVcfWorkerContext() {
+    return globalThis.__RENJU_VCF_WORKER === true;
+}
+
+function findTrunkAsset(selector, fallbackPattern, predicate = () => true) {
+    for (const element of Array.from(document.querySelectorAll(selector))) {
+        if (element.href && predicate(element.href)) {
+            return element.href;
+        }
+    }
+
+    for (const script of Array.from(document.scripts)) {
+        const text = script.textContent || "";
+        const match = text.match(fallbackPattern);
+        if (match && match[1]) {
+            return new URL(match[1], document.baseURI).href;
+        }
+    }
+
+    return null;
+}
+
+export function spawnVcfWorker(requestJson, callback) {
+    const moduleUrl = findTrunkAsset(
+        'link[rel="modulepreload"][href$=".js"]',
+        /import\s+init,\s*\*\s*as\s+bindings\s+from\s+['"]([^'"]+\.js)['"]/,
+        (href) => href.includes("Renjulibviewer_v2") && !href.includes("/snippets/")
+    );
+    const wasmUrl = findTrunkAsset(
+        'link[rel="preload"][as="fetch"][href$=".wasm"]',
+        /module_or_path:\s*['"]([^'"]+\.wasm)['"]/
+    );
+
+    if (!moduleUrl || !wasmUrl) {
+        throw new Error("VCF worker could not find Trunk wasm assets");
+    }
+
+    const workerSource = `
+        globalThis.__RENJU_VCF_WORKER = true;
+        let wasmReady = null;
+
+        async function ensureWasm() {
+            if (!wasmReady) {
+                const module = await import(${JSON.stringify(moduleUrl)});
+                wasmReady = module.default({ module_or_path: ${JSON.stringify(wasmUrl)} })
+                    .then(() => module);
+            }
+            return await wasmReady;
+        }
+
+        self.onmessage = async (event) => {
+            try {
+                const module = await ensureWasm();
+                const result = module.vcf_solve_worker(event.data);
+                self.postMessage(result);
+            } catch (error) {
+                const message = error && error.stack ? error.stack : String(error);
+                self.postMessage(JSON.stringify({ kind: "Error", message }));
+            }
+        };
+    `;
+
+    const url = URL.createObjectURL(new Blob([workerSource], { type: "text/javascript" }));
+    const worker = new Worker(url, { type: "module" });
+    URL.revokeObjectURL(url);
+
+    worker.onmessage = (event) => {
+        callback(event.data);
+        worker.terminate();
+    };
+    worker.onerror = (event) => {
+        callback(JSON.stringify({ kind: "Error", message: event.message || "VCF worker error" }));
+        worker.terminate();
+    };
+    worker.postMessage(requestJson);
+    return worker;
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = isVcfWorkerContext)]
+    fn is_vcf_worker_context() -> bool;
+
+    #[wasm_bindgen(catch, js_name = spawnVcfWorker)]
+    fn spawn_vcf_worker(
+        request_json: &str,
+        callback: &js_sys::Function,
+    ) -> Result<web_sys::Worker, JsValue>;
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize, Deserialize)]
+struct VcfWorkerRequest {
+    board: Vec<u8>,
+    turn: u8,
+    depth: usize,
+    timeout_secs: u64,
+    mode: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind")]
+enum VcfWorkerResponse {
+    Found { moves: Vec<VcfMove> },
+    NotFound,
+    Timeout,
+    Cancelled,
+    Error { message: String },
+}
+
+#[cfg(target_arch = "wasm32")]
+impl From<SolveOutcome> for VcfWorkerResponse {
+    fn from(outcome: SolveOutcome) -> Self {
+        match outcome {
+            SolveOutcome::Found(moves) => Self::Found { moves },
+            SolveOutcome::NotFound => Self::NotFound,
+            SolveOutcome::Timeout => Self::Timeout,
+            SolveOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn vcf_solve_worker(request_json: &str) -> String {
+    let response = match serde_json::from_str::<VcfWorkerRequest>(request_json) {
+        Ok(request) => {
+            let board: [u8; BOARD_CELLS] = match request.board.try_into() {
+                Ok(board) => board,
+                Err(board) => {
+                    return serde_json::to_string(&VcfWorkerResponse::Error {
+                        message: format!(
+                            "Invalid VCF worker board length: expected {BOARD_CELLS}, got {}",
+                            board.len()
+                        ),
+                    })
+                    .unwrap_or_else(|_| {
+                        "{\"kind\":\"Error\",\"message\":\"Invalid VCF worker board\"}".to_string()
+                    });
+                }
+            };
+            let mode = if request.mode == "long" {
+                SearchMode::Long
+            } else {
+                SearchMode::Shortest
+            };
+            let outcome = Solver::solve(
+                board,
+                request.turn,
+                request.depth,
+                std::time::Duration::from_secs(request.timeout_secs.max(1)),
+                mode,
+            );
+            VcfWorkerResponse::from(outcome)
+        }
+        Err(error) => VcfWorkerResponse::Error {
+            message: format!("Invalid VCF worker request: {error}"),
+        },
+    };
+
+    serde_json::to_string(&response).unwrap_or_else(|error| {
+        format!(
+            "{{\"kind\":\"Error\",\"message\":\"Failed to encode VCF worker response: {error}\"}}"
+        )
+    })
+}
 
 // ==========================================
 // フォント設定
@@ -131,6 +311,10 @@ fn main() -> eframe::Result<()> {
 /// WASM環境でのアプリケーション起動処理
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    if is_vcf_worker_context() {
+        return;
+    }
+
     eframe::WebLogger::init(log::LevelFilter::Warn).ok();
     let web_options = eframe::WebOptions::default();
 
@@ -240,6 +424,20 @@ pub struct RenjuApp {
     pub show_about: bool,
     pub show_new_game_confirm: bool,
     pub copy_notification: Option<(String, web_time::Instant)>,
+    pub vcf_solution: Vec<VcfMove>,
+    pub vcf_status: String,
+    pub vcf_solving: bool,
+    pub forbidden_points_board: [u8; BOARD_CELLS],
+    pub forbidden_points: Vec<usize>,
+    pub forbidden_points_valid: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub vcf_rx: Option<Receiver<SolveOutcome>>,
+    #[cfg(target_arch = "wasm32")]
+    pub vcf_worker: Option<web_sys::Worker>,
+    #[cfg(target_arch = "wasm32")]
+    pub vcf_worker_callback: Option<Closure<dyn FnMut(JsValue)>>,
+    #[cfg(target_arch = "wasm32")]
+    pub vcf_worker_result: Arc<Mutex<Option<String>>>,
     #[cfg(target_arch = "wasm32")]
     pub wasm_dropped_file: Arc<Mutex<Option<(String, Vec<u8>)>>>,
 }
@@ -281,6 +479,20 @@ impl RenjuApp {
             show_about: false,
             show_new_game_confirm: false,
             copy_notification: None,
+            vcf_solution: Vec::new(),
+            vcf_status: String::new(),
+            vcf_solving: false,
+            forbidden_points_board: [0; BOARD_CELLS],
+            forbidden_points: Vec::new(),
+            forbidden_points_valid: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            vcf_rx: None,
+            #[cfg(target_arch = "wasm32")]
+            vcf_worker: None,
+            #[cfg(target_arch = "wasm32")]
+            vcf_worker_callback: None,
+            #[cfg(target_arch = "wasm32")]
+            vcf_worker_result: Arc::new(Mutex::new(None)),
             #[cfg(target_arch = "wasm32")]
             wasm_dropped_file: Arc::new(Mutex::new(None)),
         }
@@ -312,6 +524,7 @@ impl RenjuApp {
         self.subtree_cache.borrow_mut().clear();
         self.export_state = ExportState::Idle;
         self.show_new_game_confirm = false;
+        self.clear_vcf_solution();
     }
 
     /// 読み込まれたバイトデータからパースを行い、アプリケーション状態を更新する
@@ -346,6 +559,7 @@ impl RenjuApp {
                     }
                 }
             }
+            self.clear_vcf_solution();
         }
     }
 
@@ -405,6 +619,7 @@ impl RenjuApp {
                     }
                 }
             }
+            self.clear_vcf_solution();
         }
     }
 
@@ -452,10 +667,12 @@ impl RenjuApp {
         } else {
             self.board.undo_all();
         }
+        self.clear_vcf_solution();
     }
 
     /// 指定された座標に石を打ち、必要に応じて新しいノードをツリーに追加する
     fn play_move(&mut self, ux: usize, uy: usize) {
+        let before_len = self.board.history.len();
         if self.is_db_mode {
             self.board.place_stone(ux, uy);
         } else if let Some(nodes) = &mut self.lib_nodes {
@@ -501,12 +718,16 @@ impl RenjuApp {
                 }
             }
         }
+        if self.board.history.len() != before_len {
+            self.clear_vcf_solution();
+        }
     }
 
     /// 現在選択されている分岐とその子孫をすべて削除する
     fn delete_current_branch(&mut self) {
         if let Some(idx) = self.node_to_delete {
             let is_current = self.get_current_node() == Some(idx);
+            let before_len = self.board.history.len();
             
             if let Some(nodes) = &mut self.lib_nodes {
                 if idx > 0 && idx < nodes.len() {
@@ -571,6 +792,9 @@ impl RenjuApp {
             }
             self.subtree_cache.borrow_mut().clear();
             self.node_to_delete = None;
+            if self.board.history.len() != before_len {
+                self.clear_vcf_solution();
+            }
         }
     }
 
@@ -592,6 +816,7 @@ impl RenjuApp {
                     }
                 }
             }
+            self.clear_vcf_solution();
             return true;
         }
         
@@ -624,6 +849,7 @@ impl RenjuApp {
             // 分岐がちょうど1つの場合のみ自動で手を進める
             if valid_moves.len() == 1 {
                 self.board.place_stone(valid_moves[0].0, valid_moves[0].1);
+                self.clear_vcf_solution();
                 return true;
             }
         } else {
@@ -635,6 +861,7 @@ impl RenjuApp {
                     if n.x() >= 0 && n.y() >= 0 {
                         self.board.place_stone(n.x() as usize, n.y() as usize);
                         self.current_node_idx = Some(first_child as usize);
+                        self.clear_vcf_solution();
                         return true;
                     }
                 }
@@ -759,6 +986,220 @@ impl RenjuApp {
     pub fn trigger_copy_notification(&mut self) {
         let tr = self.settings.tr();
         self.copy_notification = Some((tr.copied_to_clipboard.to_string(), web_time::Instant::now()));
+    }
+
+    pub fn clear_vcf_solution(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if self.vcf_solving {
+            if let Some(worker) = self.vcf_worker.take() {
+                worker.terminate();
+            }
+            self.vcf_worker_callback = None;
+            if let Ok(mut result) = self.vcf_worker_result.lock() {
+                *result = None;
+            }
+            self.vcf_solving = false;
+        }
+
+        self.vcf_solution.clear();
+        if !self.vcf_solving {
+            self.vcf_status.clear();
+        }
+    }
+
+    pub fn current_vcf_board(&self) -> [u8; BOARD_CELLS] {
+        let mut board = [0; BOARD_CELLS];
+        for (idx, player) in self.board.grid.iter().enumerate() {
+            board[idx] = match player {
+                Some(crate::board::Player::Black) => BLACK,
+                Some(crate::board::Player::White) => crate::vcf::solver::WHITE,
+                None => 0,
+            };
+        }
+        board
+    }
+
+    pub fn cached_forbidden_points(&mut self) -> &[usize] {
+        let board = self.current_vcf_board();
+        if !self.forbidden_points_valid || self.forbidden_points_board != board {
+            self.forbidden_points = Solver::black_forbidden_points(board);
+            self.forbidden_points_board = board;
+            self.forbidden_points_valid = true;
+        }
+        &self.forbidden_points
+    }
+
+    pub fn start_vcf_search(&mut self) {
+        if self.vcf_solving {
+            return;
+        }
+        let mode = match self.settings.vcf_mode {
+            setting::VcfMode::Shortest => SearchMode::Shortest,
+            setting::VcfMode::Long => SearchMode::Long,
+        };
+        let board = self.current_vcf_board();
+        let turn = match side_to_move(&board) {
+            Ok(turn) => turn,
+            Err(error) => {
+                self.vcf_status = error;
+                self.vcf_solution.clear();
+                return;
+            }
+        };
+        let depth = self.settings.vcf_depth.max(1);
+        let timeout_secs = self.settings.vcf_timeout_secs.max(1);
+        self.vcf_solution.clear();
+        self.vcf_solving = true;
+        self.vcf_status = format!(
+            "{} {} / depth {} / {}s",
+            if turn == BLACK { "Black" } else { "White" },
+            if mode == SearchMode::Long { "VCF long" } else { "VCF shortest" },
+            depth,
+            timeout_secs
+        );
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let timeout = std::time::Duration::from_secs(timeout_secs);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(Solver::solve(board, turn, depth, timeout, mode));
+            });
+            self.vcf_rx = Some(rx);
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let request = VcfWorkerRequest {
+                board: board.to_vec(),
+                turn,
+                depth,
+                timeout_secs,
+                mode: if mode == SearchMode::Long {
+                    "long".to_string()
+                } else {
+                    "shortest".to_string()
+                },
+            };
+
+            let request_json = match serde_json::to_string(&request) {
+                Ok(json) => json,
+                Err(error) => {
+                    self.vcf_solving = false;
+                    self.vcf_status = format!("VCF worker request failed: {error}");
+                    return;
+                }
+            };
+
+            if let Ok(mut result) = self.vcf_worker_result.lock() {
+                *result = None;
+            }
+
+            let result_slot = self.vcf_worker_result.clone();
+            let callback = Closure::wrap(Box::new(move |value: JsValue| {
+                let message = value.as_string().unwrap_or_else(|| {
+                    "{\"kind\":\"Error\",\"message\":\"VCF worker returned a non-string response\"}"
+                        .to_string()
+                });
+                if let Ok(mut result) = result_slot.lock() {
+                    *result = Some(message);
+                }
+            }) as Box<dyn FnMut(JsValue)>);
+
+            match spawn_vcf_worker(&request_json, callback.as_ref().unchecked_ref()) {
+                Ok(worker) => {
+                    self.vcf_worker = Some(worker);
+                    self.vcf_worker_callback = Some(callback);
+                }
+                Err(error) => {
+                    self.vcf_solving = false;
+                    self.vcf_status = format!("VCF worker start failed: {error:?}");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_vcf_search(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.vcf_rx {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    self.vcf_rx = None;
+                    self.finish_vcf_search(outcome);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(80));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.vcf_rx = None;
+                    self.vcf_solving = false;
+                    self.vcf_status = "VCF search thread ended unexpectedly".to_string();
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_vcf_search(&mut self, ctx: &egui::Context) {
+        let response_json = self
+            .vcf_worker_result
+            .lock()
+            .ok()
+            .and_then(|mut result| result.take());
+
+        if let Some(response_json) = response_json {
+            self.vcf_worker = None;
+            self.vcf_worker_callback = None;
+            match serde_json::from_str::<VcfWorkerResponse>(&response_json) {
+                Ok(VcfWorkerResponse::Found { moves }) => {
+                    self.finish_vcf_search(SolveOutcome::Found(moves));
+                }
+                Ok(VcfWorkerResponse::NotFound) => {
+                    self.finish_vcf_search(SolveOutcome::NotFound);
+                }
+                Ok(VcfWorkerResponse::Timeout) => {
+                    self.finish_vcf_search(SolveOutcome::Timeout);
+                }
+                Ok(VcfWorkerResponse::Cancelled) => {
+                    self.finish_vcf_search(SolveOutcome::Cancelled);
+                }
+                Ok(VcfWorkerResponse::Error { message }) => {
+                    self.vcf_solving = false;
+                    self.vcf_solution.clear();
+                    self.vcf_status = format!("VCF worker error: {message}");
+                }
+                Err(error) => {
+                    self.vcf_solving = false;
+                    self.vcf_solution.clear();
+                    self.vcf_status = format!("VCF worker response failed: {error}");
+                }
+            }
+            ctx.request_repaint();
+        } else if self.vcf_solving {
+            ctx.request_repaint_after(std::time::Duration::from_millis(80));
+        }
+    }
+
+    fn finish_vcf_search(&mut self, outcome: SolveOutcome) {
+        self.vcf_solving = false;
+        match outcome {
+            SolveOutcome::Found(path) => {
+                self.vcf_status = format!("VCF found: {} moves", path.len());
+                self.vcf_solution = path;
+            }
+            SolveOutcome::NotFound => {
+                self.vcf_status = "VCF not found".to_string();
+                self.vcf_solution.clear();
+            }
+            SolveOutcome::Timeout => {
+                self.vcf_status = "VCF search timed out".to_string();
+                self.vcf_solution.clear();
+            }
+            SolveOutcome::Cancelled => {
+                self.vcf_status = "VCF search cancelled".to_string();
+                self.vcf_solution.clear();
+            }
+        }
     }
 }
 
@@ -1048,6 +1489,8 @@ self.gif_frames.push(img_to_push);
         crate::ui::dialogs::draw_copy_notification(self, ctx);
 
         crate::ui::dialogs::draw_text_edit_dialog(self, ctx);
+
+        self.poll_vcf_search(ctx);
 
         if self.node_to_delete.is_none() && self.editing_coord.is_none() {
             if ctx.input(|i| i.key_pressed(egui::Key::Delete)) {

@@ -128,6 +128,20 @@ impl TextEncoding {
 /// ディスクに保存される設定データ
 fn default_true() -> bool { true }
 fn default_top_branch_highlight_count() -> usize { 3 }
+fn default_vcf_depth() -> usize { 61 }
+fn default_vcf_timeout_secs() -> u64 { 120 }
+
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub enum VcfMode {
+    Shortest,
+    Long,
+}
+
+impl Default for VcfMode {
+    fn default() -> Self {
+        Self::Shortest
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct SettingsData {
@@ -155,6 +169,14 @@ struct SettingsData {
     pub top_branch_highlight_count: usize,
     #[serde(default = "default_last_move_color")]
     pub last_move_color: [f32; 3],
+    #[serde(default = "default_true")]
+    pub show_forbidden_points: bool,
+    #[serde(default)]
+    pub vcf_mode: VcfMode,
+    #[serde(default = "default_vcf_depth")]
+    pub vcf_depth: usize,
+    #[serde(default = "default_vcf_timeout_secs")]
+    pub vcf_timeout_secs: u64,
 }
 
 fn default_max_nodes() -> usize {
@@ -206,6 +228,10 @@ pub struct Settings {
     pub show_branch_count: bool,
     pub top_branch_highlight_count: usize,
     pub last_move_color: [f32; 3],
+    pub show_forbidden_points: bool,
+    pub vcf_mode: VcfMode,
+    pub vcf_depth: usize,
+    pub vcf_timeout_secs: u64,
 }
 
 impl Default for Settings {
@@ -226,6 +252,10 @@ impl Default for Settings {
             show_branch_count: true,
             top_branch_highlight_count: 3,
             last_move_color: [1.0, 0.0, 0.0],
+            show_forbidden_points: true,
+            vcf_mode: VcfMode::Shortest,
+            vcf_depth: default_vcf_depth(),
+            vcf_timeout_secs: default_vcf_timeout_secs(),
         }
     }
 }
@@ -276,6 +306,10 @@ impl Settings {
             show_branch_count: self.show_branch_count,
             top_branch_highlight_count: self.top_branch_highlight_count,
             last_move_color: self.last_move_color,
+            show_forbidden_points: self.show_forbidden_points,
+            vcf_mode: self.vcf_mode,
+            vcf_depth: self.vcf_depth,
+            vcf_timeout_secs: self.vcf_timeout_secs,
         };
         
         if let Ok(json) = serde_json::to_string_pretty(&data) {
@@ -313,6 +347,10 @@ impl Settings {
             show_branch_count: data.show_branch_count,
             top_branch_highlight_count: data.top_branch_highlight_count,
             last_move_color: data.last_move_color,
+            show_forbidden_points: data.show_forbidden_points,
+            vcf_mode: data.vcf_mode,
+            vcf_depth: data.vcf_depth,
+            vcf_timeout_secs: data.vcf_timeout_secs,
         }
     }
 
@@ -400,6 +438,24 @@ impl Settings {
                             });
                     });
                 }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.heading(tr.vcf_section);
+                ui.checkbox(&mut self.show_forbidden_points, tr.show_forbidden_points);
+                ui.horizontal(|ui| {
+                    ui.label(tr.vcf_mode);
+                    ui.radio_value(&mut self.vcf_mode, VcfMode::Shortest, tr.vcf_shortest);
+                    ui.radio_value(&mut self.vcf_mode, VcfMode::Long, tr.vcf_long);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr.vcf_depth);
+                    ui.add(egui::DragValue::new(&mut self.vcf_depth).range(1..=225));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr.vcf_timeout);
+                    ui.add(egui::DragValue::new(&mut self.vcf_timeout_secs).range(1..=3600));
+                });
 
                 ui.add_space(8.0);
                 ui.separator();
