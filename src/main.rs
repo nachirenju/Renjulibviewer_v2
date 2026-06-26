@@ -12,7 +12,10 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 mod board; 
 mod core;
@@ -425,13 +428,19 @@ pub struct RenjuApp {
     pub show_new_game_confirm: bool,
     pub copy_notification: Option<(String, web_time::Instant)>,
     pub vcf_solution: Vec<VcfMove>,
+    pub vcf_replay_len: usize,
     pub vcf_status: String,
     pub vcf_solving: bool,
+    pub vcf_cancel_requested: bool,
+    pub vcf_started_at: Option<web_time::Instant>,
+    pub vcf_elapsed_secs: Option<f64>,
     pub forbidden_points_board: [u8; BOARD_CELLS],
     pub forbidden_points: Vec<usize>,
     pub forbidden_points_valid: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub vcf_rx: Option<Receiver<SolveOutcome>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub vcf_cancel: Option<Arc<AtomicBool>>,
     #[cfg(target_arch = "wasm32")]
     pub vcf_worker: Option<web_sys::Worker>,
     #[cfg(target_arch = "wasm32")]
@@ -480,13 +489,19 @@ impl RenjuApp {
             show_new_game_confirm: false,
             copy_notification: None,
             vcf_solution: Vec::new(),
+            vcf_replay_len: 0,
             vcf_status: String::new(),
             vcf_solving: false,
+            vcf_cancel_requested: false,
+            vcf_started_at: None,
+            vcf_elapsed_secs: None,
             forbidden_points_board: [0; BOARD_CELLS],
             forbidden_points: Vec::new(),
             forbidden_points_valid: false,
             #[cfg(not(target_arch = "wasm32"))]
             vcf_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            vcf_cancel: None,
             #[cfg(target_arch = "wasm32")]
             vcf_worker: None,
             #[cfg(target_arch = "wasm32")]
@@ -989,6 +1004,19 @@ impl RenjuApp {
     }
 
     pub fn clear_vcf_solution(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.vcf_solving {
+            if let Some(cancel) = &self.vcf_cancel {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.vcf_rx = None;
+            self.vcf_cancel = None;
+            self.vcf_solving = false;
+            self.vcf_cancel_requested = false;
+            self.vcf_started_at = None;
+            self.vcf_elapsed_secs = None;
+        }
+
         #[cfg(target_arch = "wasm32")]
         if self.vcf_solving {
             if let Some(worker) = self.vcf_worker.take() {
@@ -999,9 +1027,15 @@ impl RenjuApp {
                 *result = None;
             }
             self.vcf_solving = false;
+            self.vcf_cancel_requested = false;
+            self.vcf_started_at = None;
+            self.vcf_elapsed_secs = None;
         }
 
         self.vcf_solution.clear();
+        self.vcf_replay_len = 0;
+        self.vcf_started_at = None;
+        self.vcf_elapsed_secs = None;
         if !self.vcf_solving {
             self.vcf_status.clear();
         }
@@ -1049,7 +1083,11 @@ impl RenjuApp {
         let depth = self.settings.vcf_depth.max(1);
         let timeout_secs = self.settings.vcf_timeout_secs.max(1);
         self.vcf_solution.clear();
+        self.vcf_replay_len = 0;
         self.vcf_solving = true;
+        self.vcf_cancel_requested = false;
+        self.vcf_started_at = Some(web_time::Instant::now());
+        self.vcf_elapsed_secs = None;
         self.vcf_status = format!(
             "{} {} / depth {} / {}s",
             if turn == BLACK { "Black" } else { "White" },
@@ -1062,10 +1100,20 @@ impl RenjuApp {
         {
             let timeout = std::time::Duration::from_secs(timeout_secs);
             let (tx, rx) = std::sync::mpsc::channel();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let worker_cancel = cancel.clone();
             std::thread::spawn(move || {
-                let _ = tx.send(Solver::solve(board, turn, depth, timeout, mode));
+                let _ = tx.send(Solver::solve_with_cancel(
+                    board,
+                    turn,
+                    depth,
+                    timeout,
+                    worker_cancel,
+                    mode,
+                ));
             });
             self.vcf_rx = Some(rx);
+            self.vcf_cancel = Some(cancel);
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1086,6 +1134,7 @@ impl RenjuApp {
                 Ok(json) => json,
                 Err(error) => {
                     self.vcf_solving = false;
+                    self.finish_vcf_timer();
                     self.vcf_status = format!("VCF worker request failed: {error}");
                     return;
                 }
@@ -1113,10 +1162,78 @@ impl RenjuApp {
                 }
                 Err(error) => {
                     self.vcf_solving = false;
+                    self.finish_vcf_timer();
                     self.vcf_status = format!("VCF worker start failed: {error:?}");
                 }
             }
         }
+    }
+
+    pub fn current_vcf_elapsed_secs(&self) -> Option<f64> {
+        if self.vcf_solving {
+            self.vcf_started_at.map(|started| started.elapsed().as_secs_f64())
+        } else {
+            self.vcf_elapsed_secs
+        }
+    }
+
+    fn finish_vcf_timer(&mut self) -> Option<f64> {
+        let elapsed = self
+            .vcf_started_at
+            .take()
+            .map(|started| started.elapsed().as_secs_f64())
+            .or(self.vcf_elapsed_secs);
+        self.vcf_elapsed_secs = elapsed;
+        elapsed
+    }
+
+    pub fn cancel_vcf_search(&mut self) {
+        if !self.vcf_solving {
+            return;
+        }
+        self.vcf_cancel_requested = true;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(cancel) = &self.vcf_cancel {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            self.vcf_rx = None;
+            self.vcf_cancel = None;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(worker) = self.vcf_worker.take() {
+                worker.terminate();
+            }
+            self.vcf_worker_callback = None;
+            if let Ok(mut result) = self.vcf_worker_result.lock() {
+                *result = None;
+            }
+        }
+
+        self.finish_vcf_search(SolveOutcome::Cancelled);
+    }
+
+    pub fn vcf_replay_to_start(&mut self) {
+        if !self.vcf_solution.is_empty() {
+            self.vcf_replay_len = 0;
+        }
+    }
+
+    pub fn vcf_replay_prev(&mut self) {
+        self.vcf_replay_len = self.vcf_replay_len.saturating_sub(1);
+    }
+
+    pub fn vcf_replay_next(&mut self) {
+        if !self.vcf_solution.is_empty() {
+            self.vcf_replay_len = (self.vcf_replay_len + 1).min(self.vcf_solution.len());
+        }
+    }
+
+    pub fn vcf_replay_to_end(&mut self) {
+        self.vcf_replay_len = self.vcf_solution.len();
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1125,6 +1242,7 @@ impl RenjuApp {
             match rx.try_recv() {
                 Ok(outcome) => {
                     self.vcf_rx = None;
+                    self.vcf_cancel = None;
                     self.finish_vcf_search(outcome);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1132,7 +1250,10 @@ impl RenjuApp {
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.vcf_rx = None;
+                    self.vcf_cancel = None;
                     self.vcf_solving = false;
+                    self.vcf_cancel_requested = false;
+                    self.finish_vcf_timer();
                     self.vcf_status = "VCF search thread ended unexpectedly".to_string();
                 }
             }
@@ -1165,11 +1286,13 @@ impl RenjuApp {
                 }
                 Ok(VcfWorkerResponse::Error { message }) => {
                     self.vcf_solving = false;
+                    self.finish_vcf_timer();
                     self.vcf_solution.clear();
                     self.vcf_status = format!("VCF worker error: {message}");
                 }
                 Err(error) => {
                     self.vcf_solving = false;
+                    self.finish_vcf_timer();
                     self.vcf_solution.clear();
                     self.vcf_status = format!("VCF worker response failed: {error}");
                 }
@@ -1182,25 +1305,49 @@ impl RenjuApp {
 
     fn finish_vcf_search(&mut self, outcome: SolveOutcome) {
         self.vcf_solving = false;
+        self.vcf_cancel_requested = false;
+        let elapsed = self.finish_vcf_timer();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.vcf_cancel = None;
+        }
         match outcome {
             SolveOutcome::Found(path) => {
-                self.vcf_status = format!("VCF found: {} moves", path.len());
+                self.vcf_status = format_vcf_status("VCF found", Some(path.len()), elapsed);
+                self.vcf_replay_len = path.len();
                 self.vcf_solution = path;
             }
             SolveOutcome::NotFound => {
-                self.vcf_status = "VCF not found".to_string();
+                self.vcf_status = format_vcf_status("VCF not found", None, elapsed);
                 self.vcf_solution.clear();
+                self.vcf_replay_len = 0;
             }
             SolveOutcome::Timeout => {
-                self.vcf_status = "VCF search timed out".to_string();
+                self.vcf_status = format_vcf_status("VCF search timed out", None, elapsed);
                 self.vcf_solution.clear();
+                self.vcf_replay_len = 0;
             }
             SolveOutcome::Cancelled => {
-                self.vcf_status = "VCF search cancelled".to_string();
+                self.vcf_status = format_vcf_status("VCF search cancelled", None, elapsed);
                 self.vcf_solution.clear();
+                self.vcf_replay_len = 0;
             }
         }
     }
+}
+
+fn format_vcf_status(prefix: &str, moves: Option<usize>, elapsed: Option<f64>) -> String {
+    let mut status = if let Some(moves) = moves {
+        format!("{prefix}: {moves} moves")
+    } else {
+        prefix.to_string()
+    };
+
+    if let Some(elapsed) = elapsed {
+        status.push_str(&format!(" / {:.2}s", elapsed));
+    }
+
+    status
 }
 
 impl RenjuApp {

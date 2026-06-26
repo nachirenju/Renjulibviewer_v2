@@ -214,7 +214,7 @@ pub fn draw_vcf_solution(app: &crate::RenjuApp, painter: &egui::Painter, rect: e
                 return;
             }
             let font_id = egui::FontId::proportional(cell_size * 0.28);
-            for (i, mv) in app.vcf_solution.iter().enumerate() {
+            for (i, mv) in app.vcf_solution.iter().take(app.vcf_replay_len).enumerate() {
                 let center = egui::pos2(rect.left() + cell_size * (mv.x as f32 + 1.0), rect.top() + cell_size * (mv.y as f32 + 1.0));
                 let fill = if mv.color == BLACK {
                     egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180)

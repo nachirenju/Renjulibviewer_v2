@@ -134,10 +134,34 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                 }
 
                 if app.vcf_solving {
+                    if ui.button(egui::RichText::new("⏹").size(btn_size)).on_hover_text(tr.vcf_cancel).clicked() {
+                        app.cancel_vcf_search();
+                    }
                     ui.spinner();
-                    ui.label(egui::RichText::new(tr.vcf_solving).size(btn_size));
+                    let solving_text = if let Some(elapsed) = app.current_vcf_elapsed_secs() {
+                        format!("{} {:.1}s", tr.vcf_solving, elapsed)
+                    } else {
+                        tr.vcf_solving.to_string()
+                    };
+                    ui.label(egui::RichText::new(solving_text).size(btn_size));
                 } else if !app.vcf_status.is_empty() {
                     ui.label(egui::RichText::new(&app.vcf_status).size(btn_size));
+                }
+
+                if !app.vcf_solving && !app.vcf_solution.is_empty() {
+                    if ui.add_enabled(app.vcf_replay_len > 0, egui::Button::new(egui::RichText::new("⏮").size(btn_size))).on_hover_text(tr.vcf_replay_start).clicked() {
+                        app.vcf_replay_to_start();
+                    }
+                    if ui.add_enabled(app.vcf_replay_len > 0, egui::Button::new(egui::RichText::new("◀").size(btn_size))).on_hover_text(tr.vcf_replay_prev).clicked() {
+                        app.vcf_replay_prev();
+                    }
+                    ui.label(egui::RichText::new(format!("{}/{}", app.vcf_replay_len, app.vcf_solution.len())).size(btn_size));
+                    if ui.add_enabled(app.vcf_replay_len < app.vcf_solution.len(), egui::Button::new(egui::RichText::new("▶").size(btn_size))).on_hover_text(tr.vcf_replay_next).clicked() {
+                        app.vcf_replay_next();
+                    }
+                    if ui.add_enabled(app.vcf_replay_len < app.vcf_solution.len(), egui::Button::new(egui::RichText::new("⏭").size(btn_size))).on_hover_text(tr.vcf_replay_end).clicked() {
+                        app.vcf_replay_to_end();
+                    }
                 }
             });
             ui.add_space(4.0);
