@@ -1,21 +1,45 @@
-use super::blackforbiddenmove::{self, BlackForbiddenKind as Forbidden};
+use super::{
+    blackforbiddenmove::{self, BlackForbiddenKind as Forbidden},
+    vcf_threat,
+};
 use super::model::{BOARD_CELLS, BOARD_SIZE};
 use std::{
     cmp::Reverse,
-    collections::HashMap,
     hash::{Hash, Hasher},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        OnceLock,
     },
     time::Duration,
 };
+#[cfg(target_os = "windows")]
+use std::{
+    collections::VecDeque,
+    sync::Mutex,
+};
 use web_time::Instant;
+use rustc_hash::FxHashMap;
+
+// Public solve entry points live in their own search-family modules.  The
+// board/rule primitives and shared caches remain here because both solvers
+// mutate the same `Solver` state.
+#[path = "VCF.rs"]
+mod vcf_search;
+#[path = "VCT.rs"]
+mod vct_search;
 
 pub const EMPTY: u8 = 0;
 pub const BLACK: u8 = 1;
 pub const WHITE: u8 = 2;
 const DIRS: [(isize, isize); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+const SEARCH_CACHE_SOFT_LIMIT: usize = 120_000;
+const SEARCH_TT_SOFT_LIMIT: usize = 240_000;
+#[cfg(target_os = "windows")]
+const VCT_TRACE_LOG_LIMIT: usize = 500;
+
+#[cfg(target_os = "windows")]
+static VCT_TRACE_LOG: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Move {
@@ -39,7 +63,9 @@ pub struct RuleSnapshot {
 #[derive(Debug)]
 pub enum SolveOutcome {
     Found(Vec<Move>),
+    TacticalFound(Vec<Move>),
     NotFound,
+    Incomplete,
     Timeout,
     Cancelled,
 }
@@ -47,8 +73,25 @@ pub enum SolveOutcome {
 enum Search {
     Found(Vec<Move>),
     NotFound,
+    Incomplete,
     Timeout,
     Cancelled,
+    Backoff,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttackKind {
+    Five,
+    StraightFour,
+    Four,
+}
+
+#[derive(Clone, Debug)]
+struct VcfAttack {
+    mv: usize,
+    kind: AttackKind,
+    defenses: Vec<usize>,
+    score: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,13 +101,36 @@ struct TtKey {
     opponent_wins: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ForbiddenKey {
+    black: [u64; 4],
+    white: [u64; 4],
+    idx: u8,
+    check_three: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct BoardColorKey {
+    black: [u64; 4],
+    white: [u64; 4],
+    turn: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AttackCacheKey {
+    black: [u64; 4],
+    white: [u64; 4],
+    turn: u8,
+    opponent_wins: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchMode {
     Fast,
+    FirstWin,
     Shortest,
     Long,
 }
-
 #[derive(Clone, Copy)]
 struct BitBoard {
     black: [u64; 4],
@@ -142,9 +208,15 @@ pub struct Solver {
     zobrist: [[u64; 3]; BOARD_CELLS],
     bounds: Option<(usize, usize, usize, usize)>,
     bounds_stack: Vec<Option<(usize, usize, usize, usize)>>,
-    tt: HashMap<TtKey, usize>,
-    legacy_tt: HashMap<u64, usize>,
-    pv: HashMap<TtKey, usize>,
+    tt: FxHashMap<TtKey, usize>,
+    legacy_tt: FxHashMap<u64, usize>,
+    pv: FxHashMap<TtKey, usize>,
+    forbidden_cache: FxHashMap<ForbiddenKey, Option<Forbidden>>,
+    winning_cache: FxHashMap<BoardColorKey, Vec<usize>>,
+    attack_cache: FxHashMap<AttackCacheKey, Vec<VcfAttack>>,
+    legacy_attack_cache: FxHashMap<AttackCacheKey, Vec<usize>>,
+    /// Temporary deadline used by bounded VCF probes in Threat detection.
+    local_deadline: Option<Instant>,
     mode: SearchMode,
     started: Instant,
     time_limit: Duration,
@@ -175,7 +247,11 @@ impl Solver {
         let makes_four = solver.makes_four_or_five(x, y, color);
         let defenses = solver.vcf_defenses(color, idx);
         let immediate_win = solver.winning_moves(other(color)).into_iter().next();
-        let attacks = solver.vcf_attacks(color, &[]);
+        let attacks = solver
+            .vcf_attacks(color, &[])
+            .into_iter()
+            .map(|attack| attack.mv)
+            .collect();
         let straight_four = solver.valid_straight_four(x, y, color);
         let mut four_count = 0;
         for (dx, dy) in DIRS {
@@ -193,6 +269,134 @@ impl Solver {
         })
     }
 
+    pub fn is_legal_non_four_move(
+        board: [u8; BOARD_CELLS],
+        idx: usize,
+        color: u8,
+    ) -> Result<bool, String> {
+        if idx >= BOARD_CELLS || (color != BLACK && color != WHITE) {
+            return Err("invalid move".to_owned());
+        }
+        if board[idx] != EMPTY {
+            return Err("occupied".to_owned());
+        }
+
+        let mut solver = Self::new(board, Duration::from_secs(1), SearchMode::Fast);
+        let (x, y) = xy(idx);
+        solver.board.set(idx, color);
+        if solver.check_win(x, y, color) || solver.makes_four_or_five(x, y, color) {
+            return Ok(false);
+        }
+        if color == BLACK && solver.forbidden(x, y, true).is_some() {
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    pub fn legal_non_straight_four_after(
+        board: [u8; BOARD_CELLS],
+        idx: usize,
+        color: u8,
+    ) -> Result<bool, String> {
+        if idx >= BOARD_CELLS || (color != BLACK && color != WHITE) {
+            return Err("invalid move".to_owned());
+        }
+        if board[idx] != EMPTY {
+            return Err("occupied".to_owned());
+        }
+
+        Ok(Self::new(board, Duration::from_secs(1), SearchMode::Fast)
+            .legal_non_straight_four_on_current_board(idx, color))
+    }
+
+    pub fn legal_straight_four_after(
+        board: [u8; BOARD_CELLS],
+        idx: usize,
+        color: u8,
+    ) -> Result<bool, String> {
+        if idx >= BOARD_CELLS || (color != BLACK && color != WHITE) {
+            return Err("invalid move".to_owned());
+        }
+        if board[idx] != EMPTY {
+            return Err("occupied".to_owned());
+        }
+
+        Ok(Self::new(board, Duration::from_secs(1), SearchMode::Fast)
+            .legal_straight_four_on_current_board(idx, color))
+    }
+
+    pub(crate) fn active_three_direction_mask_on_current_board(
+        &mut self,
+        idx: usize,
+        color: u8,
+    ) -> u8 {
+        if idx >= BOARD_CELLS || !self.board.is_empty(idx) {
+            return 0;
+        }
+
+        let x = idx % BOARD_SIZE;
+        let y = idx / BOARD_SIZE;
+        let mut mask = 0u8;
+        let mut seen = [false; BOARD_CELLS];
+        let mut points = Vec::new();
+
+        for (dir_idx, (dx, dy)) in DIRS.iter().copied().enumerate() {
+            for offset in -4..=4 {
+                if offset == 0 {
+                    continue;
+                }
+                let Some(next_idx) = index(x as isize + dx * offset, y as isize + dy * offset)
+                else {
+                    continue;
+                };
+                if seen[next_idx] {
+                    continue;
+                }
+                seen[next_idx] = true;
+                if !self.board.is_empty(next_idx) {
+                    continue;
+                }
+                points.push((dir_idx, next_idx));
+            }
+        }
+
+        let mut before_straight_four = [false; BOARD_CELLS];
+        for &(_, next_idx) in &points {
+            before_straight_four[next_idx] =
+                self.legal_straight_four_on_current_board(next_idx, color);
+        }
+
+        self.put(idx, color);
+        for (dir_idx, next_idx) in points {
+            if self.board.is_empty(next_idx) {
+                let straight_four = self.legal_straight_four_on_current_board(next_idx, color);
+                if straight_four && !before_straight_four[next_idx] {
+                    mask |= 1 << dir_idx;
+                }
+            }
+        }
+        self.remove(idx, color);
+        mask
+    }
+
+    /// Returns whether an empty point is a legal non-four move on the current
+    /// board.  The Threat finder uses this to exclude direct VCF moves before
+    /// probing pass-VCF Threats.
+    pub(crate) fn is_legal_non_four_on_current_board(&mut self, idx: usize, color: u8) -> bool {
+        if idx >= BOARD_CELLS || !self.board.is_empty(idx) || (color != BLACK && color != WHITE) {
+            return false;
+        }
+
+        let (x, y) = xy(idx);
+        self.board.set(idx, color);
+        let legal = !self.check_win(x, y, color)
+            && !self.makes_four_or_five(x, y, color)
+            && (color != BLACK || self.forbidden(x, y, true).is_none());
+        self.board.clear(idx);
+        legal
+    }
+
     pub fn immediate_win(board: [u8; BOARD_CELLS], color: u8) -> Option<usize> {
         let mut solver = Self::new(board, Duration::from_secs(1), SearchMode::Fast);
         solver.winning_moves(color).into_iter().next()
@@ -203,7 +407,135 @@ impl Solver {
     }
 
     pub fn vcf_attacks_for(board: [u8; BOARD_CELLS], color: u8) -> Vec<usize> {
-        Self::new(board, Duration::from_secs(1), SearchMode::Fast).vcf_attacks(color, &[])
+        Self::new(board, Duration::from_secs(1), SearchMode::Fast)
+            .vcf_attacks(color, &[])
+            .into_iter()
+            .map(|attack| attack.mv)
+            .collect()
+    }
+
+    pub fn find_vcf_threats_reusing_cache(
+        board: [u8; BOARD_CELLS],
+        turn: u8,
+        max_depth: usize,
+        time_limit: Duration,
+        mode: SearchMode,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> vcf_threat::ThreatSearchOutcome {
+        vcf_search::find_threats(board, turn, max_depth, time_limit, mode, cancel)
+    }
+
+    fn find_vcf_threats_engine(
+        board: [u8; BOARD_CELLS],
+        turn: u8,
+        max_depth: usize,
+        time_limit: Duration,
+        mode: SearchMode,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> vcf_threat::ThreatSearchOutcome {
+        let cancel_flag = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let mut solver = Self::new_with_cancel(board, time_limit, cancel_flag.clone(), mode);
+        let started = Instant::now();
+        let mut threats = Vec::new();
+        let mut candidates = Vec::new();
+
+        for idx in vcf_threat::ordered_threat_candidates(&board, turn) {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return vcf_threat::ThreatSearchOutcome::Cancelled;
+            }
+            if time_limit.checked_sub(started.elapsed()).is_none() {
+                return vcf_threat::ThreatSearchOutcome::Partial(threats);
+            }
+            // Reuse the solver that will immediately generate VCF attacks.
+            // The old helper constructed a short-lived Solver for every
+            // candidate and then repeated the same board/rule work here.
+            if !solver.is_legal_non_four_on_current_board(idx, turn)
+                || solver.active_three_direction_mask_on_current_board(idx, turn) != 0
+            {
+                continue;
+            }
+
+            solver.board.set(idx, turn);
+            let attack_count = solver.vcf_attacks(turn, &[]).len();
+            solver.board.clear(idx);
+            if attack_count == 0 {
+                continue;
+            }
+
+            let x = idx % BOARD_SIZE;
+            let y = idx / BOARD_SIZE;
+            let center_distance = x.abs_diff(BOARD_SIZE / 2) + y.abs_diff(BOARD_SIZE / 2);
+            candidates.push((idx, attack_count, center_distance));
+        }
+
+        candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+
+        let mut found = [false; BOARD_CELLS];
+        let quick_limit = vcf_threat_quick_candidate_time_limit(time_limit);
+        let quick_probe_count = candidates.len().min(32);
+
+        for (idx, _, _) in candidates.iter().copied().take(quick_probe_count) {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return vcf_threat::ThreatSearchOutcome::Cancelled;
+            }
+            let Some(remaining) = time_limit.checked_sub(started.elapsed()) else {
+                return vcf_threat::ThreatSearchOutcome::Partial(threats);
+            };
+            if remaining.is_zero() {
+                return vcf_threat::ThreatSearchOutcome::Partial(threats);
+            }
+
+            if matches!(
+                solver.probe_vcf_after_move(idx, turn, max_depth, Some(remaining.min(quick_limit))),
+                Search::Found(_)
+            ) {
+                threats.push(Move {
+                    x: idx % BOARD_SIZE,
+                    y: idx / BOARD_SIZE,
+                    color: turn,
+                });
+                found[idx] = true;
+            }
+        }
+
+        let candidate_count = candidates.len();
+        let mut incomplete = false;
+        for (candidate_index, (idx, _, _)) in candidates.into_iter().enumerate() {
+            if found[idx] {
+                continue;
+            }
+            if cancel_flag.load(Ordering::Relaxed) {
+                return vcf_threat::ThreatSearchOutcome::Cancelled;
+            }
+            let Some(remaining) = time_limit.checked_sub(started.elapsed()) else {
+                return vcf_threat::ThreatSearchOutcome::Partial(threats);
+            };
+            if remaining.is_zero() {
+                return vcf_threat::ThreatSearchOutcome::Partial(threats);
+            }
+
+            let candidates_left = candidate_count.saturating_sub(candidate_index).max(1);
+            let candidate_limit =
+                remaining.min(vcf_threat_candidate_time_limit(remaining, candidates_left));
+            match solver.probe_vcf_after_move(idx, turn, max_depth, Some(candidate_limit)) {
+                Search::Found(_) => threats.push(Move {
+                    x: idx % BOARD_SIZE,
+                    y: idx / BOARD_SIZE,
+                    color: turn,
+                }),
+                Search::Timeout | Search::Incomplete | Search::Backoff => {
+                    incomplete = true;
+                }
+                Search::Cancelled => return vcf_threat::ThreatSearchOutcome::Cancelled,
+                Search::NotFound => {}
+            }
+        }
+
+        if incomplete {
+            vcf_threat::ThreatSearchOutcome::Partial(threats)
+        } else {
+            vcf_threat::ThreatSearchOutcome::Complete(threats)
+        }
     }
 
     pub fn is_black_forbidden(board: [u8; BOARD_CELLS], idx: usize) -> Option<&'static str> {
@@ -235,26 +567,54 @@ impl Solver {
         cancel: Arc<AtomicBool>,
         mode: SearchMode,
     ) -> SolveOutcome {
-        let mut solver = Self::new_with_cancel(board, time_limit, cancel, mode);
-        let empty_cells = BOARD_CELLS - board.iter().filter(|&&stone| stone != EMPTY).count();
-        let effective_depth = max_depth.min(empty_cells).max(1);
-        let depths = match mode {
-            SearchMode::Fast => depth_schedule(effective_depth),
-            SearchMode::Shortest => linear_depth_schedule(effective_depth),
-            SearchMode::Long => depth_schedule(effective_depth),
-        };
-        for depth in depths {
-            solver.tt.clear();
-            solver.legacy_tt.clear();
-            match solver.solve_at(turn, 0, depth) {
-                Search::Found(path) => return SolveOutcome::Found(path),
-                Search::Timeout => return SolveOutcome::Timeout,
-                Search::Cancelled => return SolveOutcome::Cancelled,
-                Search::NotFound => {}
-            }
-        }
-        SolveOutcome::NotFound
+        vcf_search::solve(board, turn, max_depth, time_limit, cancel, mode)
     }
+
+    pub fn solve_vct(
+        board: [u8; BOARD_CELLS],
+        turn: u8,
+        max_depth: usize,
+        time_limit: Duration,
+        mode: SearchMode,
+    ) -> SolveOutcome {
+        Self::solve_vct_with_cancel(
+            board,
+            turn,
+            max_depth,
+            time_limit,
+            Arc::new(AtomicBool::new(false)),
+            mode,
+        )
+    }
+
+    pub fn solve_vct_with_cancel(
+        board: [u8; BOARD_CELLS],
+        turn: u8,
+        max_depth: usize,
+        time_limit: Duration,
+        cancel: Arc<AtomicBool>,
+        mode: SearchMode,
+    ) -> SolveOutcome {
+        vct_search::solve(board, turn, max_depth, time_limit, cancel, mode)
+    }
+
+    pub fn solve_vct_with_progress<F>(
+        board: [u8; BOARD_CELLS],
+        turn: u8,
+        max_depth: usize,
+        time_limit: Duration,
+        cancel: Arc<AtomicBool>,
+        mode: SearchMode,
+        progress: F,
+    ) -> SolveOutcome
+    where
+        F: FnMut(Vec<Move>) + Send + 'static,
+    {
+        vct_search::solve_with_progress(board, turn, max_depth, time_limit, cancel, mode, progress)
+    }
+
+
+
 
     pub fn solve_shortest(
         board: [u8; BOARD_CELLS],
@@ -278,19 +638,7 @@ impl Solver {
         time_limit: Duration,
         cancel: Arc<AtomicBool>,
     ) -> SolveOutcome {
-        let mut solver = Self::new_with_cancel(board, time_limit, cancel, SearchMode::Shortest);
-        let empty_cells = BOARD_CELLS - board.iter().filter(|&&stone| stone != EMPTY).count();
-        let effective_depth = max_depth.min(empty_cells).max(1);
-        for depth in linear_depth_schedule(effective_depth) {
-            solver.tt.clear();
-            match solver.solve_at(turn, 0, depth) {
-                Search::Found(path) => return SolveOutcome::Found(path),
-                Search::Timeout => return SolveOutcome::Timeout,
-                Search::Cancelled => return SolveOutcome::Cancelled,
-                Search::NotFound => {}
-            }
-        }
-        SolveOutcome::NotFound
+        vcf_search::solve_shortest(board, turn, max_depth, time_limit, cancel)
     }
 
     pub fn black_forbidden_points(board: [u8; BOARD_CELLS]) -> Vec<usize> {
@@ -304,7 +652,7 @@ impl Solver {
         blackforbiddenmove::forbidden_points(board)
     }
 
-    fn new(board: [u8; BOARD_CELLS], time_limit: Duration, mode: SearchMode) -> Self {
+    pub(crate) fn new(board: [u8; BOARD_CELLS], time_limit: Duration, mode: SearchMode) -> Self {
         Self::new_with_cancel(board, time_limit, Arc::new(AtomicBool::new(false)), mode)
     }
 
@@ -337,9 +685,14 @@ impl Solver {
             zobrist,
             bounds,
             bounds_stack: Vec::with_capacity(128),
-            tt: HashMap::new(),
-            legacy_tt: HashMap::new(),
-            pv: HashMap::new(),
+            tt: FxHashMap::default(),
+            legacy_tt: FxHashMap::default(),
+            pv: FxHashMap::default(),
+            forbidden_cache: FxHashMap::default(),
+            winning_cache: FxHashMap::default(),
+            attack_cache: FxHashMap::default(),
+            legacy_attack_cache: FxHashMap::default(),
+            local_deadline: None,
             mode,
             started: Instant::now(),
             time_limit,
@@ -347,9 +700,25 @@ impl Solver {
         }
     }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
     fn solve_at(&mut self, turn: u8, depth: usize, max_depth: usize) -> Search {
         if self.timed_out() {
             return Search::Timeout;
+        }
+        if self.local_deadline_expired() {
+            return Search::Backoff;
         }
         if self.cancelled() {
             return Search::Cancelled;
@@ -369,18 +738,21 @@ impl Solver {
         let mut attacks = self.vcf_attacks(turn, &opponent_wins);
         self.prioritize_pv(&mut attacks, key);
         if attacks.is_empty() {
+            clear_if_over_limit(&mut self.tt, SEARCH_TT_SOFT_LIMIT);
             self.tt.insert(key, rest);
             return Search::NotFound;
         }
         for attack in attacks {
-            match self.verify_move(attack, turn, depth, max_depth) {
+            let result = self.verify_move(&attack, turn, depth, max_depth);
+
+            match result {
                 Search::Found(mut path) => {
-                    self.pv.insert(key, attack);
+                    self.pv.insert(key, attack.mv);
                     path.insert(
                         0,
                         Move {
-                            x: attack % BOARD_SIZE,
-                            y: attack / BOARD_SIZE,
+                            x: attack.mv % BOARD_SIZE,
+                            y: attack.mv / BOARD_SIZE,
                             color: turn,
                         },
                     );
@@ -388,16 +760,69 @@ impl Solver {
                 }
                 Search::Timeout => return Search::Timeout,
                 Search::Cancelled => return Search::Cancelled,
+                Search::Incomplete => return Search::Incomplete,
+                Search::Backoff => return Search::Backoff,
                 Search::NotFound => {}
             }
         }
+        clear_if_over_limit(&mut self.tt, SEARCH_TT_SOFT_LIMIT);
         self.tt.insert(key, rest);
         Search::NotFound
     }
 
+
+    fn probe_vcf_after_move(
+        &mut self,
+        idx: usize,
+        attacker: u8,
+        max_depth: usize,
+        local_limit: Option<Duration>,
+    ) -> Search {
+        if idx >= BOARD_CELLS || !self.board.is_empty(idx) {
+            return Search::NotFound;
+        }
+
+        let before_black = self.board.black;
+        let before_white = self.board.white;
+        let before_hash = self.hash;
+        let before_bounds = self.bounds;
+        let before_bounds_stack_len = self.bounds_stack.len();
+        let previous_deadline = self.local_deadline;
+
+        self.put(idx, attacker);
+        if let Some(limit) = local_limit {
+            self.local_deadline = Some(Instant::now() + limit);
+        }
+        let result = match self.solve_at(attacker, 0, max_depth) {
+            Search::Backoff if local_limit.is_some() => Search::Incomplete,
+            other => other,
+        };
+        self.local_deadline = previous_deadline;
+        self.remove(idx, attacker);
+
+        self.bounds_stack.truncate(before_bounds_stack_len);
+        debug_assert_eq!(self.board.black, before_black);
+        debug_assert_eq!(self.board.white, before_white);
+        debug_assert_eq!(self.hash, before_hash);
+        debug_assert_eq!(self.bounds, before_bounds);
+        debug_assert_eq!(self.bounds_stack.len(), before_bounds_stack_len);
+
+        result
+    }
+
+
+
+
+
+
+
+
     fn solve_at_legacy(&mut self, turn: u8, depth: usize, max_depth: usize) -> Search {
         if self.timed_out() {
             return Search::Timeout;
+        }
+        if self.local_deadline_expired() {
+            return Search::Backoff;
         }
         if self.cancelled() {
             return Search::Cancelled;
@@ -413,6 +838,7 @@ impl Solver {
         let opponent_wins = self.winning_moves(other(turn));
         let attacks = self.vcf_attacks_legacy(turn, &opponent_wins);
         if attacks.is_empty() {
+            clear_if_over_limit(&mut self.legacy_tt, SEARCH_TT_SOFT_LIMIT);
             self.legacy_tt.insert(self.hash, rest);
             return Search::NotFound;
         }
@@ -431,31 +857,42 @@ impl Solver {
                 }
                 Search::Timeout => return Search::Timeout,
                 Search::Cancelled => return Search::Cancelled,
+                Search::Incomplete => return Search::Incomplete,
+                Search::Backoff => return Search::Backoff,
                 Search::NotFound => {}
             }
         }
+        clear_if_over_limit(&mut self.legacy_tt, SEARCH_TT_SOFT_LIMIT);
         self.legacy_tt.insert(self.hash, rest);
         Search::NotFound
     }
 
-    fn verify_move(&mut self, attack: usize, turn: u8, depth: usize, max_depth: usize) -> Search {
+    fn verify_move(
+        &mut self,
+        attack: &VcfAttack,
+        turn: u8,
+        depth: usize,
+        max_depth: usize,
+    ) -> Search {
         if self.timed_out() {
             return Search::Timeout;
+        }
+        if self.local_deadline_expired() {
+            return Search::Incomplete;
         }
         if self.cancelled() {
             return Search::Cancelled;
         }
-        let (ax, ay) = xy(attack);
-        self.put(attack, turn);
-        if self.check_win(ax, ay, turn) || self.valid_straight_four(ax, ay, turn) {
-            self.remove(attack, turn);
+        self.put(attack.mv, turn);
+        if attack.kind != AttackKind::Four {
+            self.remove(attack.mv, turn);
             return Search::Found(Vec::new());
         }
 
         let opponent = other(turn);
-        let mut defenses = self.vcf_defenses(turn, attack);
+        let mut defenses = attack.defenses.clone();
         if defenses.is_empty() {
-            self.remove(attack, turn);
+            self.remove(attack.mv, turn);
             return Search::Found(Vec::new());
         }
         if opponent == BLACK {
@@ -467,11 +904,11 @@ impl Solver {
                 valid
             });
             if defenses.is_empty() {
-                self.remove(attack, turn);
+                self.remove(attack.mv, turn);
                 return Search::Found(Vec::new());
             }
         }
-        self.order_defenses(&mut defenses, opponent, turn);
+        self.order_defenses(&mut defenses, opponent, attack.mv);
 
         let mut longest = Vec::new();
         for defense in defenses {
@@ -506,22 +943,35 @@ impl Solver {
                     }
                 }
                 Search::Timeout => {
-                    self.remove(attack, turn);
+                    self.remove(attack.mv, turn);
                     return Search::Timeout;
                 }
                 Search::Cancelled => {
-                    self.remove(attack, turn);
+                    self.remove(attack.mv, turn);
                     return Search::Cancelled;
                 }
+                Search::Incomplete => {
+                    self.remove(attack.mv, turn);
+                    return Search::Incomplete;
+                }
+                Search::Backoff => {
+                    self.remove(attack.mv, turn);
+                    return Search::Backoff;
+                }
                 Search::NotFound => {
-                    self.remove(attack, turn);
+                    self.remove(attack.mv, turn);
                     return Search::NotFound;
                 }
             }
         }
-        self.remove(attack, turn);
+        self.remove(attack.mv, turn);
         Search::Found(longest)
     }
+
+
+
+
+
 
     fn verify_move_legacy(
         &mut self,
@@ -601,6 +1051,14 @@ impl Solver {
                     self.remove(attack, turn);
                     return Search::Cancelled;
                 }
+                Search::Incomplete => {
+                    self.remove(attack, turn);
+                    return Search::Incomplete;
+                }
+                Search::Backoff => {
+                    self.remove(attack, turn);
+                    return Search::Backoff;
+                }
                 Search::NotFound => {
                     self.remove(attack, turn);
                     return Search::NotFound;
@@ -611,39 +1069,99 @@ impl Solver {
         Search::Found(longest)
     }
 
-    fn vcf_attacks(&mut self, turn: u8, opponent_wins: &[usize]) -> Vec<usize> {
-        let (min_x, max_x, min_y, max_y) = self.active_range();
+    fn vcf_attacks(&mut self, turn: u8, opponent_wins: &[usize]) -> Vec<VcfAttack> {
+        let key = AttackCacheKey {
+            black: self.board.black,
+            white: self.board.white,
+            turn,
+            opponent_wins: opponent_wins_signature(opponent_wins),
+        };
+        if let Some(cached) = self.attack_cache.get(&key) {
+            return cached.clone();
+        }
+
+        let mut seen = [false; BOARD_CELLS];
         let mut result = Vec::new();
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let idx = y * BOARD_SIZE + x;
-                if !self.board.is_empty(idx) {
-                    continue;
-                }
-                self.board.set(idx, turn);
-                let wins_now = self.check_win(x, y, turn);
-                let stops_opponent = opponent_wins.is_empty()
-                    || (opponent_wins.len() == 1 && opponent_wins[0] == idx);
-                let candidate = if wins_now {
-                    true
-                } else if !stops_opponent {
-                    false
-                } else if turn == BLACK {
-                    self.makes_four_or_five(x, y, turn) && self.forbidden(x, y, true).is_none()
-                } else {
-                    self.makes_four_or_five(x, y, turn)
-                };
-                if candidate {
-                    result.push((idx, self.priority(x, y, turn)));
-                }
-                self.board.clear(idx);
+        for idx in self.line_attack_candidates(turn, true) {
+            if seen[idx] || !self.board.is_empty(idx) {
+                continue;
+            }
+            seen[idx] = true;
+            if let Some(attack) = self.vcf_attack_after_move(idx, turn, opponent_wins) {
+                result.push(attack);
             }
         }
-        result.sort_by_key(|item| Reverse(item.1));
-        result.into_iter().map(|(idx, _)| idx).collect()
+
+        for idx in 0..BOARD_CELLS {
+            if seen[idx] || !self.board.is_empty(idx) {
+                continue;
+            }
+            seen[idx] = true;
+            if let Some(attack) = self.vcf_attack_after_move(idx, turn, opponent_wins) {
+                result.push(attack);
+            }
+        }
+
+        result.sort_by_key(|attack| Reverse(attack.score));
+        clear_if_over_limit(&mut self.attack_cache, SEARCH_CACHE_SOFT_LIMIT);
+        self.attack_cache.insert(key, result.clone());
+        result
+    }
+
+    fn vcf_attack_after_move(
+        &mut self,
+        idx: usize,
+        turn: u8,
+        opponent_wins: &[usize],
+    ) -> Option<VcfAttack> {
+        let (x, y) = xy(idx);
+        self.board.set(idx, turn);
+        let wins_now = self.check_win(x, y, turn);
+        let stops_opponent =
+            opponent_wins.is_empty() || (opponent_wins.len() == 1 && opponent_wins[0] == idx);
+        let kind = if wins_now {
+            Some(AttackKind::Five)
+        } else if !stops_opponent {
+            None
+        } else if turn == BLACK {
+            if self.makes_four_or_five(x, y, turn) && self.forbidden(x, y, true).is_none() {
+                Some(self.attack_kind_after_move(x, y, turn))
+            } else {
+                None
+            }
+        } else {
+            self.makes_four_or_five(x, y, turn)
+                .then(|| self.attack_kind_after_move(x, y, turn))
+        };
+
+        let attack = kind.map(|kind| {
+            let defenses = if kind == AttackKind::Four {
+                self.vcf_defenses(turn, idx)
+            } else {
+                Vec::new()
+            };
+            VcfAttack {
+                mv: idx,
+                kind,
+                defenses,
+                score: self.priority(x, y, turn),
+            }
+        });
+        self.board.clear(idx);
+        attack
     }
 
     fn vcf_attacks_legacy(&mut self, turn: u8, opponent_wins: &[usize]) -> Vec<usize> {
+        let key = AttackCacheKey {
+            black: self.board.black,
+            white: self.board.white,
+            turn,
+            opponent_wins: opponent_wins_signature(opponent_wins),
+        };
+        if let Some(cached) = self.legacy_attack_cache.get(&key) {
+            return cached.clone();
+        }
+
         let (min_x, max_x, min_y, max_y) = self.active_range();
         let mut result = Vec::new();
         for y in min_y..=max_y {
@@ -672,46 +1190,72 @@ impl Solver {
             }
         }
         result.sort_by_key(|item| Reverse(item.1));
-        result.into_iter().map(|(idx, _)| idx).collect()
+        let attacks: Vec<usize> = result.into_iter().map(|(idx, _)| idx).collect();
+        clear_if_over_limit(&mut self.legacy_attack_cache, SEARCH_CACHE_SOFT_LIMIT);
+        self.legacy_attack_cache.insert(key, attacks.clone());
+        attacks
     }
 
-    fn prioritize_pv(&self, attacks: &mut [usize], key: TtKey) {
+
+
+
+    fn prioritize_pv(&self, attacks: &mut [VcfAttack], key: TtKey) {
         let Some(&pv_move) = self.pv.get(&key) else {
             return;
         };
-        if let Some(index) = attacks.iter().position(|&attack| attack == pv_move) {
+        if let Some(index) = attacks.iter().position(|attack| attack.mv == pv_move) {
             attacks.swap(0, index);
         }
     }
 
-    fn order_defenses(&mut self, defenses: &mut [usize], defender: u8, attacker: u8) {
-        let mut scored = defenses
+
+
+    fn order_defenses(&mut self, defenses: &mut [usize], defender: u8, attack: usize) {
+        let mut scored: Vec<(i32, usize)> = defenses
             .iter()
             .copied()
-            .map(|idx| (idx, self.defense_refutation_score(idx, defender, attacker)))
-            .collect::<Vec<_>>();
-        scored.sort_by_key(|&(_, score)| score);
-        for (target, (idx, _)) in defenses.iter_mut().zip(scored) {
-            *target = idx;
+            .map(|idx| (self.defense_score(idx, defender, attack), idx))
+            .collect();
+        scored.sort_unstable_by_key(|&(score, idx)| (score, idx));
+
+        for (dst, (_, idx)) in defenses.iter_mut().zip(scored) {
+            *dst = idx;
         }
     }
 
-    fn defense_refutation_score(&mut self, idx: usize, defender: u8, attacker: u8) -> i32 {
+    fn order_defenses_light(&self, defenses: &mut [usize], defender: u8, attack: usize) {
+        let (ax, ay) = xy(attack);
+        defenses.sort_by_key(|&idx| {
+            let (x, y) = xy(idx);
+            (x.abs_diff(ax) + y.abs_diff(ay)) as i32 - self.priority(x, y, defender)
+        });
+    }
+
+    fn defense_score(&mut self, idx: usize, defender: u8, attack: usize) -> i32 {
         let (x, y) = xy(idx);
         self.board.set(idx, defender);
-        let score = if self.check_win(x, y, defender) {
-            -1_000_000
+        let wins = self.check_win(x, y, defender);
+        let makes_four = if wins {
+            false
         } else {
-            let attacks = self.vcf_attacks(attacker, &[]);
-            if attacks.is_empty() {
-                -500_000
-            } else {
-                (attacks.len() as i32) * 10_000 - self.priority(x, y, defender)
-            }
+            self.makes_four_or_five(x, y, defender)
         };
         self.board.clear(idx);
-        score
+
+        if wins {
+            -1_000_000
+        } else if makes_four {
+            -500_000 - self.priority(x, y, defender)
+        } else {
+            let (ax, ay) = xy(attack);
+            (x.abs_diff(ax) + y.abs_diff(ay)) as i32 - self.priority(x, y, defender)
+        }
     }
+
+
+
+
+
 
     fn vcf_defenses(&self, attacker: u8, last: usize) -> Vec<usize> {
         let (lx, ly) = xy(last);
@@ -753,7 +1297,20 @@ impl Solver {
 
     fn forbidden(&mut self, x: usize, y: usize, check_three: bool) -> Option<Forbidden> {
         let idx = y * BOARD_SIZE + x;
-        blackforbiddenmove::placed_forbidden(self.board.to_cells(), idx, check_three)
+        let key = ForbiddenKey {
+            black: self.board.black,
+            white: self.board.white,
+            idx: idx as u8,
+            check_three,
+        };
+        if let Some(&cached) = self.forbidden_cache.get(&key) {
+            return cached;
+        }
+
+        let result = blackforbiddenmove::placed_forbidden(self.board.to_cells(), idx, check_three);
+        clear_if_over_limit(&mut self.forbidden_cache, SEARCH_CACHE_SOFT_LIMIT);
+        self.forbidden_cache.insert(key, result);
+        result
     }
 
     fn four_patterns(&mut self, x: usize, y: usize, dx: isize, dy: isize, color: u8) -> usize {
@@ -840,23 +1397,202 @@ impl Solver {
         false
     }
 
+    fn attack_kind_after_move(&mut self, x: usize, y: usize, color: u8) -> AttackKind {
+        if self.valid_straight_four(x, y, color) {
+            AttackKind::StraightFour
+        } else {
+            AttackKind::Four
+        }
+    }
+
     fn winning_moves(&mut self, turn: u8) -> Vec<usize> {
+        let key = BoardColorKey {
+            black: self.board.black,
+            white: self.board.white,
+            turn,
+        };
+        if let Some(cached) = self.winning_cache.get(&key) {
+            return cached.clone();
+        }
+
+        let mut seen = [false; BOARD_CELLS];
         let mut wins = Vec::new();
-        let (min_x, max_x, min_y, max_y) = self.active_range();
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let idx = y * BOARD_SIZE + x;
-                if !self.board.is_empty(idx) {
+        for idx in self.line_attack_candidates(turn, false) {
+            if !self.board.is_empty(idx) {
+                continue;
+            }
+            seen[idx] = true;
+            let (x, y) = xy(idx);
+            self.board.set(idx, turn);
+            if self.check_win(x, y, turn) {
+                wins.push(idx);
+            }
+            self.board.clear(idx);
+        }
+        for idx in 0..BOARD_CELLS {
+            if seen[idx] || !self.board.is_empty(idx) {
+                continue;
+            }
+            let (x, y) = xy(idx);
+            self.board.set(idx, turn);
+            if self.check_win(x, y, turn) {
+                wins.push(idx);
+            }
+            self.board.clear(idx);
+        }
+        clear_if_over_limit(&mut self.winning_cache, SEARCH_CACHE_SOFT_LIMIT);
+        self.winning_cache.insert(key, wins.clone());
+        wins
+    }
+
+
+
+    pub(crate) fn legal_straight_four_on_current_board(&mut self, idx: usize, color: u8) -> bool {
+        if idx >= BOARD_CELLS || !self.board.is_empty(idx) {
+            return false;
+        }
+        let (x, y) = xy(idx);
+        self.board.set(idx, color);
+        let straight_four = self.valid_straight_four(x, y, color);
+        let forbidden =
+            color == BLACK && !self.check_win(x, y, color) && self.forbidden(x, y, true).is_some();
+        self.board.clear(idx);
+        straight_four && !forbidden
+    }
+
+
+
+
+
+
+
+
+
+
+
+    pub(crate) fn legal_non_straight_four_on_current_board(
+        &mut self,
+        idx: usize,
+        color: u8,
+    ) -> bool {
+        if idx >= BOARD_CELLS || !self.board.is_empty(idx) {
+            return false;
+        }
+        let (x, y) = xy(idx);
+        self.board.set(idx, color);
+        let valid = !self.check_win(x, y, color)
+            && self.makes_four_or_five(x, y, color)
+            && !self.valid_straight_four(x, y, color)
+            && (color != BLACK || self.forbidden(x, y, true).is_none());
+        self.board.clear(idx);
+        valid
+    }
+
+    fn active_three_defenses_after_move(&mut self, attack: usize, color: u8) -> Vec<usize> {
+        let (ax, ay) = xy(attack);
+        let mut seen = [false; BOARD_CELLS];
+        let mut defenses = Vec::new();
+
+        for (dx, dy) in DIRS {
+            for offset in -4..=4 {
+                if offset == 0 {
                     continue;
                 }
-                self.board.set(idx, turn);
-                if self.check_win(x, y, turn) {
-                    wins.push(idx);
+                let Some(idx) = index(ax as isize + dx * offset, ay as isize + dy * offset) else {
+                    continue;
+                };
+                if seen[idx] || !self.board.is_empty(idx) {
+                    continue;
                 }
-                self.board.clear(idx);
+                seen[idx] = true;
+
+                if !self.legal_straight_four_on_current_board(idx, color) {
+                    continue;
+                }
+
+                self.board.clear(attack);
+                let already_straight_four = self.legal_straight_four_on_current_board(idx, color);
+                self.board.set(attack, color);
+                if !already_straight_four {
+                    defenses.push(idx);
+                }
             }
         }
-        wins
+
+        defenses
+    }
+
+
+    pub(crate) fn four_move_has_simultaneous_active_three(
+        &mut self,
+        attack: usize,
+        color: u8,
+    ) -> bool {
+        if attack >= BOARD_CELLS || !self.board.is_empty(attack) {
+            return false;
+        }
+        let (x, y) = xy(attack);
+        self.board.set(attack, color);
+        let legal =
+            color != BLACK || self.check_win(x, y, color) || self.forbidden(x, y, true).is_none();
+        let active_three = legal && !self.active_three_defenses_after_move(attack, color).is_empty();
+        self.board.clear(attack);
+        active_three
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    fn line_attack_candidates(&self, turn: u8, include_four_makers: bool) -> Vec<usize> {
+        let mut seen = [false; BOARD_CELLS];
+        let mut candidates = Vec::new();
+
+        for window in five_point_windows() {
+            let mut stones = 0;
+            let mut empties = Vec::new();
+            let mut blocked = false;
+
+            for &idx in window {
+                match self.board.get(idx) {
+                    value if value == turn => stones += 1,
+                    EMPTY => empties.push(idx),
+                    _ => {
+                        blocked = true;
+                        break;
+                    }
+                }
+            }
+            if blocked {
+                continue;
+            }
+
+            if stones == 4 && empties.len() == 1 {
+                push_unique(&mut candidates, &mut seen, empties[0]);
+            } else if include_four_makers && stones == 3 && empties.len() == 2 {
+                for idx in empties {
+                    push_unique(&mut candidates, &mut seen, idx);
+                }
+            }
+        }
+
+        candidates
     }
 
     fn check_win(&self, x: usize, y: usize, color: u8) -> bool {
@@ -936,20 +1672,20 @@ impl Solver {
                 if ox == 0 && oy == 0 {
                     continue;
                 }
-                if let Some(idx) = index(x as isize + ox, y as isize + oy) {
-                    if !self.board.is_empty(idx) {
-                        score += 10;
-                    }
-                    if self.board.get(idx) == color {
-                        score += 5;
-                    }
+                let Some(idx) = index(x as isize + ox, y as isize + oy) else {
+                    continue;
+                };
+                if self.board.get(idx) == color {
+                    score += 4;
+                } else if self.board.get(idx) == other(color) {
+                    score += 1;
                 }
             }
         }
-        score - (x.abs_diff(7) + y.abs_diff(7)) as i32
+        score * 100 - (x.abs_diff(7) + y.abs_diff(7)) as i32
     }
 
-    fn put(&mut self, idx: usize, color: u8) {
+    pub(super) fn put(&mut self, idx: usize, color: u8) {
         debug_assert!(self.board.is_empty(idx));
         self.bounds_stack.push(self.bounds);
         let (x, y) = xy(idx);
@@ -958,7 +1694,7 @@ impl Solver {
         self.hash ^= self.zobrist[idx][color as usize];
     }
 
-    fn remove(&mut self, idx: usize, color: u8) {
+    pub(super) fn remove(&mut self, idx: usize, color: u8) {
         self.hash ^= self.zobrist[idx][color as usize];
         debug_assert_eq!(self.board.get(idx), color);
         self.board.clear(idx);
@@ -973,6 +1709,12 @@ impl Solver {
     }
 
     #[inline]
+    fn local_deadline_expired(&self) -> bool {
+        self.local_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    #[inline]
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
@@ -984,7 +1726,9 @@ impl Solver {
             opponent_wins: opponent_wins_signature(opponent_wins),
         }
     }
+
 }
+
 
 fn opponent_wins_signature(opponent_wins: &[usize]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1021,6 +1765,40 @@ fn index(x: isize, y: isize) -> Option<usize> {
     }
 }
 
+fn five_point_windows() -> &'static Vec<[usize; 5]> {
+    static WINDOWS: OnceLock<Vec<[usize; 5]>> = OnceLock::new();
+    WINDOWS.get_or_init(|| {
+        let mut windows = Vec::new();
+        for (dx, dy) in DIRS {
+            for y in 0..BOARD_SIZE {
+                for x in 0..BOARD_SIZE {
+                    let end_x = x as isize + dx * 4;
+                    let end_y = y as isize + dy * 4;
+                    if index(end_x, end_y).is_none() {
+                        continue;
+                    }
+
+                    let mut window = [0; 5];
+                    for step in 0..5 {
+                        window[step as usize] =
+                            index(x as isize + dx * step, y as isize + dy * step)
+                                .expect("validated five-point line must stay on the board");
+                    }
+                    windows.push(window);
+                }
+            }
+        }
+        windows
+    })
+}
+
+fn push_unique(items: &mut Vec<usize>, seen: &mut [bool; BOARD_CELLS], idx: usize) {
+    if !seen[idx] {
+        seen[idx] = true;
+        items.push(idx);
+    }
+}
+
 fn expand_bounds(
     bounds: Option<(usize, usize, usize, usize)>,
     x: usize,
@@ -1038,6 +1816,21 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+/// Bound long-running search caches without periodically throwing away their
+/// entire working set.  Removing a small arbitrary slice is intentionally
+/// policy-free: every cache remains advisory and exact TT/proof results are
+/// still recomputed when absent.  It avoids the large allocation and latency
+/// spike caused by a full clear at the soft limit.
+fn clear_if_over_limit<K: Clone + Eq + Hash, V>(map: &mut FxHashMap<K, V>, limit: usize) {
+    if map.len() > limit {
+        let evict = (limit / 8).max(1).min(map.len());
+        let keys = map.keys().take(evict).cloned().collect::<Vec<_>>();
+        for key in keys {
+            map.remove(&key);
+        }
+    }
+}
+
 fn linear_depth_schedule(max_depth: usize) -> Vec<usize> {
     let max_depth = if max_depth % 2 == 0 {
         max_depth.saturating_sub(1).max(1)
@@ -1051,199 +1844,58 @@ fn linear_depth_schedule(max_depth: usize) -> Vec<usize> {
     depths
 }
 
-fn depth_schedule(max_depth: usize) -> Vec<usize> {
-    let max_depth = if max_depth.is_multiple_of(2) {
-        max_depth.saturating_sub(1).max(1)
-    } else {
-        max_depth
-    };
-    let mut depths: Vec<usize> = (1..=max_depth.min(21)).step_by(2).collect();
-    let mut depth = 29;
-    while depth < max_depth {
-        depths.push(depth);
-        depth += 8;
+fn vcf_depth_schedule_for_mode(mode: SearchMode, max_depth: usize) -> Vec<usize> {
+    match mode {
+        SearchMode::Shortest => linear_depth_schedule(max_depth),
+        SearchMode::Fast | SearchMode::FirstWin | SearchMode::Long => {
+            let depth = if max_depth.is_multiple_of(2) {
+                max_depth.saturating_sub(1).max(1)
+            } else {
+                max_depth
+            };
+            vec![depth]
+        }
     }
-    if depths.last().copied() != Some(max_depth) {
-        depths.push(max_depth);
-    }
-    depths
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn vcf_threat_candidate_time_limit(remaining: Duration, candidates_left: usize) -> Duration {
+    let candidates_left = candidates_left.max(1) as u128;
+    let millis = (remaining.as_millis() / candidates_left).clamp(500, 10_000) as u64;
+    Duration::from_millis(millis)
+}
 
-    #[test]
-    fn bitboard_set_replace_and_clear() {
-        let cells = [0; BOARD_CELLS];
-        let mut board = BitBoard::from_cells(&cells);
-        for idx in [0, 63, 64, 127, 128, 191, 224] {
-            board.set(idx, BLACK);
-            assert_eq!(board.get(idx), BLACK);
-            board.set(idx, WHITE);
-            assert_eq!(board.get(idx), WHITE);
-            board.clear(idx);
-            assert!(board.is_empty(idx));
-        }
+fn vcf_threat_quick_candidate_time_limit(total_limit: Duration) -> Duration {
+    let millis = (total_limit.as_millis() / 500).clamp(10, 30) as u64;
+    Duration::from_millis(millis)
+}
+
+#[cfg(target_os = "windows")]
+fn vct_trace_log() -> &'static Mutex<VecDeque<String>> {
+    VCT_TRACE_LOG.get_or_init(|| Mutex::new(VecDeque::with_capacity(VCT_TRACE_LOG_LIMIT)))
+}
+
+#[cfg(target_os = "windows")]
+fn remember_vct_trace_line(line: String) {
+    let Ok(mut log) = vct_trace_log().lock() else {
+        return;
+    };
+    if log.len() >= VCT_TRACE_LOG_LIMIT {
+        log.pop_front();
     }
+    log.push_back(line);
+}
 
-    #[test]
-    fn long_depth_schedule_reaches_beyond_fifty_without_every_iteration() {
-        let schedule = depth_schedule(61);
-        assert_eq!(schedule.last(), Some(&61));
-        assert!(schedule.contains(&53));
-        assert!(!schedule.contains(&51));
-        assert!(schedule.len() < 20);
+#[cfg(target_os = "windows")]
+pub fn vct_trace_snapshot() -> Vec<String> {
+    vct_trace_log()
+        .lock()
+        .map(|log| log.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+pub fn clear_vct_trace_log() {
+    if let Ok(mut log) = vct_trace_log().lock() {
+        log.clear();
     }
-
-    #[test]
-    fn cancelled_search_stops_before_work() {
-        let cancel = Arc::new(AtomicBool::new(true));
-        let result = Solver::solve_with_cancel(
-            [0; BOARD_CELLS],
-            BLACK,
-            81,
-            Duration::from_secs(10),
-            cancel,
-            SearchMode::Fast,
-        );
-        assert!(matches!(result, SolveOutcome::Cancelled));
-    }
-
-    #[test]
-    fn cached_active_range_restores_after_remove() {
-        let mut board = [0; BOARD_CELLS];
-        board[7 * BOARD_SIZE + 7] = BLACK;
-        let mut solver = Solver::new(board, Duration::from_secs(1), SearchMode::Fast);
-        let original = solver.active_range();
-        solver.put(14 * BOARD_SIZE + 14, WHITE);
-        assert_eq!(solver.active_range(), (5, 14, 5, 14));
-        solver.remove(14 * BOARD_SIZE + 14, WHITE);
-        assert_eq!(solver.active_range(), original);
-    }
-
-    #[test]
-    fn side_to_move_checks_counts() {
-        let mut board = [0; BOARD_CELLS];
-        assert_eq!(side_to_move(&board).unwrap(), BLACK);
-        board[112] = BLACK;
-        assert_eq!(side_to_move(&board).unwrap(), WHITE);
-        board[113] = BLACK;
-        assert!(side_to_move(&board).is_err());
-    }
-
-    #[test]
-    fn finds_immediate_five() {
-        let mut board = [0; BOARD_CELLS];
-        for x in 4..8 {
-            board[7 * BOARD_SIZE + x] = BLACK;
-        }
-        let result = Solver::solve(board, BLACK, 1, Duration::from_secs(1), SearchMode::Fast);
-        assert!(matches!(result, SolveOutcome::Found(path) if path.len() == 1));
-    }
-
-    #[test]
-    fn long_mode_keeps_fast_mode_candidate_order_for_basic_win() {
-        let mut board = [0; BOARD_CELLS];
-        for x in 4..8 {
-            board[7 * BOARD_SIZE + x] = BLACK;
-        }
-        let fast = Solver::solve(board, BLACK, 9, Duration::from_secs(1), SearchMode::Fast);
-        let long = Solver::solve(board, BLACK, 9, Duration::from_secs(1), SearchMode::Long);
-        assert!(matches!(fast, SolveOutcome::Found(path) if path.len() == 1));
-        assert!(matches!(long, SolveOutcome::Found(path) if path.len() == 1));
-    }
-
-    #[test]
-    fn does_not_ignore_opponents_open_four() {
-        let mut board = [0; BOARD_CELLS];
-        for x in 3..7 {
-            board[3 * BOARD_SIZE + x] = WHITE;
-        }
-        for x in 4..7 {
-            board[10 * BOARD_SIZE + x] = BLACK;
-        }
-        board[12 * BOARD_SIZE + 12] = BLACK;
-
-        let result = Solver::solve(board, BLACK, 3, Duration::from_secs(1), SearchMode::Fast);
-        assert!(matches!(result, SolveOutcome::NotFound));
-    }
-
-    #[test]
-    fn forbidden_overline_survives_bitboard_conversion() {
-        let mut cells = [0; BOARD_CELLS];
-        for x in 3..9 {
-            cells[7 * BOARD_SIZE + x] = BLACK;
-        }
-        let mut solver = Solver::new(cells, Duration::from_secs(1), SearchMode::Fast);
-        assert_eq!(solver.forbidden(8, 7, true), Some(Forbidden::Overline));
-    }
-
-    #[test]
-    fn forbidden_double_four_survives_bitboard_conversion() {
-        let mut cells = [0; BOARD_CELLS];
-        for x in 4..=7 {
-            cells[7 * BOARD_SIZE + x] = BLACK;
-        }
-        for y in 4..=6 {
-            cells[y * BOARD_SIZE + 7] = BLACK;
-        }
-        let mut solver = Solver::new(cells, Duration::from_secs(1), SearchMode::Fast);
-        assert_eq!(solver.forbidden(7, 7, true), Some(Forbidden::DoubleFour));
-    }
-
-    #[test]
-    fn forbidden_double_three_survives_bitboard_conversion() {
-        let mut cells = [0; BOARD_CELLS];
-        for (x, y) in [(6, 7), (7, 7), (8, 7), (7, 6), (7, 8)] {
-            cells[y * BOARD_SIZE + x] = BLACK;
-        }
-        let mut solver = Solver::new(cells, Duration::from_secs(1), SearchMode::Fast);
-        assert_eq!(solver.forbidden(7, 7, true), Some(Forbidden::DoubleThree));
-    }
-
-    #[test]
-    fn forbidden_points_include_double_three_but_not_exact_five() {
-        let mut double_three = [0; BOARD_CELLS];
-        for (x, y) in [(6, 7), (8, 7), (7, 6), (7, 8)] {
-            double_three[y * BOARD_SIZE + x] = BLACK;
-        }
-        for (x, y) in [(0, 0), (1, 0), (2, 0), (3, 0)] {
-            double_three[y * BOARD_SIZE + x] = WHITE;
-        }
-        assert!(Solver::black_forbidden_points(double_three).contains(&(7 * BOARD_SIZE + 7)));
-
-        let mut exact_five = [0; BOARD_CELLS];
-        for x in 3..7 {
-            exact_five[7 * BOARD_SIZE + x] = BLACK;
-        }
-        exact_five[..4].fill(WHITE);
-        assert!(!Solver::black_forbidden_points(exact_five).contains(&(7 * BOARD_SIZE + 7)));
-    }
-
-    #[test]
-    fn false_double_three_ignores_three_whose_vital_point_is_forbidden() {
-        let mut cells = [0; BOARD_CELLS];
-        for (x, y) in [
-            (6, 7),
-            (8, 7),
-            (7, 8),
-            (7, 10),
-            (6, 9),
-            (8, 9),
-            (6, 8),
-            (8, 10),
-        ] {
-            cells[y * BOARD_SIZE + x] = BLACK;
-        }
-
-        let b = 7 * BOARD_SIZE + 7;
-        let a = 9 * BOARD_SIZE + 7;
-
-        let mut with_b = cells;
-        with_b[b] = BLACK;
-        assert_eq!(Solver::is_black_forbidden(with_b, a), Some("double-three"));
-        assert_eq!(Solver::is_black_forbidden(cells, b), None);
-    }
-
 }

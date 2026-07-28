@@ -86,4 +86,9 @@ trunk serve
   Licensed under the [SIL Open Font License, Version 1.1](http://scripts.sil.org/OFL).
   Subsetted files provided by [taka4sato/NotoSans-SubsetFont](https://github.com/taka4sato/NotoSans-SubsetFont).
 
+### Quintet
+
+本アプリの VCT 機能は、yubessy 様作成の [Quintet](https://github.com/renju-note/quintet) を使用しています。  
+Quintet は [MIT License](https://github.com/renju-note/quintet/blob/master/LICENSE) の下で提供されています。ライセンス本文は [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) を参照してください。
+
 Developed by **nachirenju**

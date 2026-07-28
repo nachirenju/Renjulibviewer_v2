@@ -22,18 +22,20 @@ impl Zobrist {
 
     #[inline(always)]
     pub fn get_transformed_idx(x: i8, y: i8, t: usize) -> usize {
-        if x < 0 || y < 0 || x > 14 || y > 14 { return 0; }
-        let cx = 7; 
+        if x < 0 || y < 0 || x > 14 || y > 14 {
+            return 0;
+        }
+        let cx = 7;
         let cy = 7;
         let (tx, ty) = match t {
-            0 => (x, y),                                   
-            1 => (cx + (y - cy), cy - (x - cx)),           
-            2 => (cx - (x - cx), cy - (y - cy)),           
-            3 => (cx - (y - cy), cy + (x - cx)),           
-            4 => (x, cy - (y - cy)),                       
-            5 => (cx + (y - cy), cy + (x - cx)),           
-            6 => (cx - (x - cx), cy + (y - cy)),           
-            7 => (cx - (y - cy), cy - (x - cx)),           
+            0 => (x, y),
+            1 => (cx + (y - cy), cy - (x - cx)),
+            2 => (cx - (x - cx), cy - (y - cy)),
+            3 => (cx - (y - cy), cy + (x - cx)),
+            4 => (x, cy - (y - cy)),
+            5 => (cx + (y - cy), cy + (x - cx)),
+            6 => (cx - (x - cx), cy + (y - cy)),
+            7 => (cx - (y - cy), cy - (x - cx)),
             _ => unreachable!(),
         };
         (ty as usize * 15) + tx as usize

@@ -9,26 +9,51 @@ readme = "README.md"
 keywords = ["renju", "gomoku", "viewer", "egui"]
 categories = ["games", "gui"]
 
+[lib]
+name = "renjulibviewer_native"
+path = "src/main.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "Renjulibviewer_v2"
+path = "src/main.rs"
+
 [dependencies]
 # --- 全プラットフォーム共通の依存関係 ---
-eframe = "0.30"
+eframe = { version = "0.30", default-features = false, features = ["android-native-activity", "default_fonts", "glow", "persistence"] }
 encoding_rs = "0.8"
 lz4_flex = "0.11"
 byteorder = "1.5"
-rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 image = "0.24"
 rustc-hash = "2.1"
+# Quintet's DF-PNS VCT engine is kept separate from this application's VCF
+# and Threat viewer APIs.  See THIRD_PARTY_NOTICES for its MIT license.
+quintet = { path = "third_party/quintet" }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_os = "android"), not(target_os = "ios")))'.dependencies]
+rfd = "0.15"
 rand = "0.8"
 web-time = "1.1"
 memmap2 = "0.9"
 pollster = "0.3"
 rayon = "1.10"
 
+[target.'cfg(target_os = "ios")'.dependencies]
+rand = "0.8"
+web-time = "1.1"
+pollster = "0.3"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+jni = "0.22"
+rand = "0.8"
+web-time = "1.1"
+pollster = "0.3"
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+rfd = "0.15"
 rand = "0.8"
 getrandom = { version = "0.2", features = ["js"] }
 wasm-bindgen-futures = "0.4"

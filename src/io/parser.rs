@@ -1,13 +1,17 @@
-use std::io::{self, Read, BufRead};
-use rustc_hash::FxHashMap;
 use encoding_rs::SHIFT_JIS;
+use rustc_hash::FxHashMap;
+use std::io::{self, BufRead, Read};
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(target_os = "android"),
+    not(target_os = "ios")
+))]
 use rayon::prelude::*;
 
+use crate::core::hash_board::Board;
 use crate::core::node::*;
 use crate::core::zobrist::Zobrist;
-use crate::core::hash_board::Board;
 
 // バイト列のパース状態を管理する構造体を定義する
 struct ParserContext<R: BufRead> {
@@ -66,17 +70,16 @@ impl<R: BufRead> ParserContext<R> {
         self.reader.read_exact(&mut self.buffer[..len])?;
         Ok(&self.buffer[..len])
     }
-
 }
 
 // 棋譜ファイルのパースおよび木構造構築を行う構造体を定義する
 pub struct RenLibParser {
     pub nodes: Vec<RenLibNode>,
-    pub hash_table: FxHashMap<u64, u32>, 
+    pub hash_table: FxHashMap<u64, u32>,
     pub node_texts: Vec<u32>, // FxHashMap から Vec に
     pub max_nodes: usize,
     pub encoding: &'static encoding_rs::Encoding,
-    pub text_pool: TextPool, 
+    pub text_pool: TextPool,
 }
 
 // 深さ優先探索時の状態を保持するスタックフレーム構造体を定義する
@@ -109,7 +112,7 @@ impl RenLibParser {
     pub fn new(max_nodes: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(20000),
-            hash_table: FxHashMap::default(), 
+            hash_table: FxHashMap::default(),
             node_texts: Vec::new(), // default から Vec::new() に
             max_nodes,
             encoding: SHIFT_JIS,
@@ -122,168 +125,148 @@ impl RenLibParser {
         self.encoding = encoding;
     }
 
-
-
     // .lib のバイナリデータから「1手分の情報」を読み取り、
-// self.nodes にノードを追加する処理。
-// offset は「今どこまで読んだか」を示す読み取り位置。
-#[inline(always)]
-fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<NodeInfo> {
+    // self.nodes にノードを追加する処理。
+    // offset は「今どこまで読んだか」を示す読み取り位置。
+    #[inline(always)]
+    fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<NodeInfo> {
+        // ノード数制限を超えた、または残りデータ不足なら終了
+        if self.nodes.len() >= self.max_nodes || *offset + 1 >= data.len() {
+            return None;
+        }
 
-    // ノード数制限を超えた、または残りデータ不足なら終了
-    if self.nodes.len() >= self.max_nodes || *offset + 1 >= data.len() {
-        return None;
-    }
-
-    // 1バイト目 = 着手座標
-    // 2バイト目 = 子ノード有無・コメント有無などのフラグ
-    let move_byte = data[*offset];
-    let flag = data[*offset + 1];
-    *offset += 2;
-
-    // move_byte を x,y 座標へ変換
-    // move_byte == 0 は仮想ルートノード（盤面に石が存在しない）
-    let (x, y) = if move_byte == 0 {
-        (-1, -1)
-    } else {
-        (
-            ((move_byte & 0x0f) as i8 - 1),
-            ((move_byte >> 4) as i8),
-        )
-    };
-
-    // テキストフラグが立っている場合、
-    // .lib仕様上2バイトのパディングが入るためスキップ
-    if (flag & MASK_TEXT) != 0 {
+        // 1バイト目 = 着手座標
+        // 2バイト目 = 子ノード有無・コメント有無などのフラグ
+        let move_byte = data[*offset];
+        let flag = data[*offset + 1];
         *offset += 2;
-    }
 
-    // コメント文字列・ラベル文字列を取り出す処理
-    // .lib内の文字列は文字列データ＋0(null終端文字)で管理されている:
-    // 新しく文字列メモリをコピーせず、元dataの一部(slice)を直接参照する。コピーしないことによってメモリ負担を軽くする、
-    let mut extract_string = || -> u32 {
-
-        // 現在位置を記録
-        let start = *offset;
-
-        // null文字(0)まで探す
-        // iterator を使うことで内部的にSIMD最適化される場合がある
-        if let Some(null_pos) = data[*offset..].iter().position(|&b| b == 0) {
-            *offset += null_pos;
+        // move_byte を x,y 座標へ変換
+        // move_byte == 0 は仮想ルートノード（盤面に石が存在しない）
+        let (x, y) = if move_byte == 0 {
+            (-1, -1)
         } else {
-            // null終端が見つからない異常データ時は末尾まで進める
-            *offset = data.len();
+            (((move_byte & 0x0f) as i8 - 1), ((move_byte >> 4) as i8))
+        };
+
+        // テキストフラグが立っている場合、
+        // .lib仕様上2バイトのパディングが入るためスキップ
+        if (flag & MASK_TEXT) != 0 {
+            *offset += 2;
         }
 
-        let str_len = *offset - start;
+        // コメント文字列・ラベル文字列を取り出す処理
+        // .lib内の文字列は文字列データ＋0(null終端文字)で管理されている:
+        // 新しく文字列メモリをコピーせず、元dataの一部(slice)を直接参照する。コピーしないことによってメモリ負担を軽くする、
+        let mut extract_string = || -> u32 {
+            // 現在位置を記録
+            let start = *offset;
 
-        // data本体をコピーせず slice として切り出す
-        let slice = &data[start..*offset];
+            // null文字(0)まで探す
+            // iterator を使うことで内部的にSIMD最適化される場合がある
+            if let Some(null_pos) = data[*offset..].iter().position(|&b| b == 0) {
+                *offset += null_pos;
+            } else {
+                // null終端が見つからない異常データ時は末尾まで進める
+                *offset = data.len();
+            }
 
-        // null文字を読み飛ばす
-        if *offset < data.len() {
-            *offset += 1;
-        }
+            let str_len = *offset - start;
 
-        // .lib は2バイト境界へ揃える仕様のため、
-        // 奇数長なら追加1バイトをスキップ
-        if (str_len + 1) % 2 != 0 {
+            // data本体をコピーせず slice として切り出す
+            let slice = &data[start..*offset];
+
+            // null文字を読み飛ばす
             if *offset < data.len() {
                 *offset += 1;
             }
-        }
 
-        // 空文字なら NO_TEXT,それ以外は text_pool に登録しID化
-        // text_pool:同じ文字列を共有しメモリ重複を防ぐ仕組み
-        if slice.is_empty() {
-            NO_TEXT
-        } else {
-            self.text_pool.get_or_insert(slice)
-        }
-    };
+            // .lib は2バイト境界へ揃える仕様のため、
+            // 奇数長なら追加1バイトをスキップ
+            if (str_len + 1) % 2 != 0 {
+                if *offset < data.len() {
+                    *offset += 1;
+                }
+            }
 
-    // コメント文字列を読み込む
-    let comment_id =
-        if (flag & MASK_COMMENT) != 0 {
+            // 空文字なら NO_TEXT,それ以外は text_pool に登録しID化
+            // text_pool:同じ文字列を共有しメモリ重複を防ぐ仕組み
+            if slice.is_empty() {
+                NO_TEXT
+            } else {
+                self.text_pool.get_or_insert(slice)
+            }
+        };
+
+        // コメント文字列を読み込む
+        let comment_id = if (flag & MASK_COMMENT) != 0 {
             extract_string()
         } else {
             NO_TEXT
         };
 
-    // ラベル文字列を読み込む
-    let text_id =
-        if (flag & MASK_TEXT) != 0 {
+        // ラベル文字列を読み込む
+        let text_id = if (flag & MASK_TEXT) != 0 {
             extract_string()
         } else {
             NO_TEXT
         };
 
-    // 新ノードのindex
-    let idx = self.nodes.len();
+        // 新ノードのindex
+        let idx = self.nodes.len();
 
-    // ノード本体を追加
-    // parent/child/sibling はまだ未接続なので NO_NODE
-    // hash/depth も parse_all 側で後から計算する
-    self.nodes.push(
-        RenLibNode::new(
-            x,
-            y,
-            NO_NODE,
-            NO_NODE,
-            NO_NODE,
-            0,
-            0,
-        )
-    );
+        // ノード本体を追加
+        // parent/child/sibling はまだ未接続なので NO_NODE
+        // hash/depth も parse_all 側で後から計算する
+        self.nodes
+            .push(RenLibNode::new(x, y, NO_NODE, NO_NODE, NO_NODE, 0, 0));
 
-    // comment_id と text_idという二つの値を u32型の一つの値へ圧縮して保存
-    // 下位16bit = comment
-    // 上位16bit = text
-    let texts =
-        if comment_id != NO_TEXT || text_id != NO_TEXT {
-
+        // comment_id と text_idという二つの値を u32型の一つの値へ圧縮して保存
+        // 下位16bit = comment
+        // 上位16bit = text
+        let texts = if comment_id != NO_TEXT || text_id != NO_TEXT {
             // 16bit超過防止
             let cid = std::cmp::min(comment_id, 0xFFFF);
             let tid = std::cmp::min(text_id, 0xFFFF);
 
             cid | (tid << 16)
-
         } else {
-
             // コメント・テキスト両方無しを表す特殊値。
             // 下位16bit(comment)、上位16bit(text) の両方へ
             // 0xFFFF (=65535, 16bit全部1) を格納。
             0xFFFF | (0xFFFF << 16)
         };
 
-    self.node_texts.push(texts);
+        self.node_texts.push(texts);
 
-    // parse_all 側へ返す情報
-    //
-    // has_child:
-    // 次に子ノード読み込みが必要か
-    //
-    // has_sibling:
-    // 帰り時に兄弟ノード読み込みが必要か
-    Some(NodeInfo {
-        idx,
-        has_child: (flag & MASK_NOCHILD) == 0,
-        has_sibling: (flag & MASK_SIBLING) != 0,
-    })
-}
+        // parse_all 側へ返す情報
+        //
+        // has_child:
+        // 次に子ノード読み込みが必要か
+        //
+        // has_sibling:
+        // 帰り時に兄弟ノード読み込みが必要か
+        Some(NodeInfo {
+            idx,
+            has_child: (flag & MASK_NOCHILD) == 0,
+            has_sibling: (flag & MASK_SIBLING) != 0,
+        })
+    }
 
     // 01で構成されるバイナリデータで記された局面の木構造をメモリへ復元する
     pub fn parse_all(&mut self, data: &[u8], board: &mut Board) -> io::Result<()> {
-        if data.len() < 20 { return Ok(()); } // ヘッダーサイズ未満は弾く
+        if data.len() < 20 {
+            return Ok(());
+        } // ヘッダーサイズ未満は弾く
         let mut offset = 20; // offsetとは今何バイト目を読んでいるかという目印。.libにおいて最初の20バイトはヘッダー、棋譜に関与しない情報なので除外
-        
+
         // 1ノード平均3バイトで見積もり、読み込むファイル分のメモリを確保
         let estimated_nodes = (data.len() / 3).max(1000).min(self.max_nodes);
 
         //いま読み込もうとしているファイルの前に残っていた情報をリセットし、読み込まれた分のメモリを追加で確保する
         self.nodes.clear();
         self.node_texts.clear();
-        self.hash_table.clear(); 
+        self.hash_table.clear();
 
         self.nodes.reserve(estimated_nodes);
         self.node_texts.reserve(estimated_nodes);
@@ -292,14 +275,15 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
         //ハッシュについてやってることを端的に言うと、CPUが処理しやすいようにデータを整理する
         let mut flat_hashes = Vec::with_capacity(estimated_nodes);
 
-        
         //初期盤面＝ルートノードの作成。-1,-1は盤面に石がない状態。
-        self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));//参考：RenlibNode::new(x(i8),y(i8),親(u32),子,(u32),兄弟(u32),hash(u64),depth(u32)　括弧内は型 node.rs内のimpl Renlibnodeも参照
+        self.nodes
+            .push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0)); //参考：RenlibNode::new(x(i8),y(i8),親(u32),子,(u32),兄弟(u32),hash(u64),depth(u32)　括弧内は型 node.rs内のimpl Renlibnodeも参照
         self.node_texts.push(0xFFFF | (0xFFFF << 16)); // ルートノード用のテキスト初期値を追加
 
         // ルートノードの読み込みを試行する
         let mut root_info = match self.read_node_from_slice(data, &mut offset) {
-            Some(info) => info, None => return Ok(()),
+            Some(info) => info,
+            None => return Ok(()),
         };
 
         // ルートノードがパス指定（座標が負）の場合の移譲処理を行う
@@ -311,15 +295,16 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
             }
             self.node_texts.pop(); // 古いルートのテキスト情報を削除
             let has_child = root_info.has_child;
-            self.nodes.pop(); 
+            self.nodes.pop();
             // 子ノードが存在すればそれを新しい実質ルートとしてパースする
             if has_child {
                 // 新ルートの読み込みを試行する
                 root_info = match self.read_node_from_slice(data, &mut offset) {
-                    Some(info) => info, None => return Ok(()),
+                    Some(info) => info,
+                    None => return Ok(()),
                 };
             } else {
-                return Ok(()); 
+                return Ok(());
             }
         }
 
@@ -331,14 +316,17 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
         // 再帰呼び出しや盤面コピーを避け、
         // make_move / undo_move により1枚の盤面を共有して探索する。これによりメモリ負担を軽減する。
 
-        let mut stack = Vec::with_capacity(225);// DFSの探索状態(StackFrame)をVecの連続メモリ上で管理（あるノードにおける探索やることリスト）。
-                                                // stack は現在の探索経路のみを保持する一時領域。
-                                                // 連珠は最大225手のため、探索深さも最大225となる
+        let mut stack = Vec::with_capacity(225); // DFSの探索状態(StackFrame)をVecの連続メモリ上で管理（あるノードにおける探索やることリスト）。
+        // stack は現在の探索経路のみを保持する一時領域。
+        // 連珠は最大225手のため、探索深さも最大225となる
 
         //やることリストのメモ内容：現在の局面、ステージ(行きor帰り)、子ノード及び兄弟ノードの有無、いまいるノードで石を置いたか：石を置く＝奥のノードに行く。帰りの時に石を取り除く
         stack.push(StackFrame {
-            node_idx: root_info.idx, stage: 0,
-            has_child: root_info.has_child, has_sibling: root_info.has_sibling, made_move: false,
+            node_idx: root_info.idx,
+            stage: 0,
+            has_child: root_info.has_child,
+            has_sibling: root_info.has_sibling,
+            made_move: false,
         });
 
         /*全体の流れのイメージは
@@ -352,16 +340,12 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
         DFS順に.libを読み進めながら、
         木構造(self.nodes)と局面検索用ハッシュを構築する。*/
 
-        
-        
-        
-
         // スタックを空にする＝一番奥のノードまで行き返ってくるまでの処理
         while let Some(mut frame) = stack.pop() {
-            let curr_idx = frame.node_idx;//現在の局面
-            let stage = frame.stage;//行きか帰りか
-            let has_child = frame.has_child;//子ノードがあるか
-            let has_sibling = frame.has_sibling;//兄弟ノードがあるか
+            let curr_idx = frame.node_idx; //現在の局面
+            let stage = frame.stage; //行きか帰りか
+            let has_child = frame.has_child; //子ノードがあるか
+            let has_sibling = frame.has_sibling; //兄弟ノードがあるか
 
             // 行き（stage 0）の処理、この段階では一番奥のノードまで到達できていない
             if stage == 0 {
@@ -373,32 +357,31 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                     // 座標が0〜14の範囲内かチェックする
                     if px >= 0 && px < 15 && py >= 0 && py < 15 {
                         let idx = (py as usize) * 15 + (px as usize);
-                        unsafe { (*board.occupied.get_unchecked(idx / 64) & (1 << (idx % 64))) == 0 }
+                        unsafe {
+                            (*board.occupied.get_unchecked(idx / 64) & (1 << (idx % 64))) == 0
+                        }
                     } else {
                         false
                     }
                 };
-                
+
                 let mut applied = false;
-                
 
                 // 合法局面として盤面状態を更新し、ハッシュ・深さを確定
                 if is_valid {
                     board.make_move(px, py);
-                    applied = true;//帰ってくるときのための目印
-                    
-                    
+                    applied = true; //帰ってくるときのための目印
+
                     let hash = board.get_canonical_hash();
                     self.nodes[curr_idx].hash = hash;
-                    self.nodes[curr_idx].set_depth(board.move_count as u8); 
-                    
-                    
+                    self.nodes[curr_idx].set_depth(board.move_count as u8);
+
                     flat_hashes.push((hash, curr_idx as u32));
                 }
 
-                frame.stage = 1;//行きの処理が終わったので帰りの処理をするときのためにステージ1に書き換える
-                frame.made_move = applied;//着手が行なわれたという記録、戻ってくるときの判定に使う
-                stack.push(frame);//リストの一番上に追加
+                frame.stage = 1; //行きの処理が終わったので帰りの処理をするときのためにステージ1に書き換える
+                frame.made_move = applied; //着手が行なわれたという記録、戻ってくるときの判定に使う
+                stack.push(frame); //リストの一番上に追加
 
                 // 一番奥に行くことを優先する
                 if has_child {
@@ -406,8 +389,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                         self.nodes[child_info.idx].parent = curr_idx as u32;
                         self.nodes[curr_idx].child = child_info.idx as u32;
                         stack.push(StackFrame {
-                            node_idx: child_info.idx, stage: 0,
-                            has_child: child_info.has_child, has_sibling: child_info.has_sibling, made_move: false,
+                            node_idx: child_info.idx,
+                            stage: 0,
+                            has_child: child_info.has_child,
+                            has_sibling: child_info.has_sibling,
+                            made_move: false,
                         });
                     }
                 }
@@ -427,8 +413,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                         self.nodes[sib_info.idx].parent = p_idx;
                         self.nodes[curr_idx].sibling = sib_info.idx as u32;
                         stack.push(StackFrame {
-                            node_idx: sib_info.idx, stage: 0,
-                            has_child: sib_info.has_child, has_sibling: sib_info.has_sibling, made_move: false,
+                            node_idx: sib_info.idx,
+                            stage: 0,
+                            has_child: sib_info.has_child,
+                            has_sibling: sib_info.has_sibling,
+                            made_move: false,
                         });
                     }
                 }
@@ -437,18 +426,22 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
 
         // ループ終了後に一気に並列ソート＆重複排除して HashMap を構築
         //イメージとして、例えば(hash.index)が(A,05),(B,03),(C.06)のようにメモリに一直線に並ぶ状態を作る
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "android"),
+            not(target_os = "ios")
+        ))]
         {
             flat_hashes.par_sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
         {
             flat_hashes.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
         }
 
         // 重複削除＝同一局面ハッシュを一つに圧縮
         flat_hashes.dedup_by_key(|k| k.0);
-        
+
         // 削除して空いた分のメモリを開放する
         flat_hashes.shrink_to_fit();
 
@@ -462,9 +455,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
     }
 
     // .dbファイルをストリームから直接パースする（メモリ消費最小化）
+    #[allow(dead_code)] // Called by platform UI entry points, which are absent in the cdylib build.
+    #[allow(dead_code)] // Called by platform UI entry points, which are absent in the cdylib build.
     pub fn parse_db_from_reader<R: Read>(&mut self, reader: R) -> io::Result<()> {
         let mut buf_reader = std::io::BufReader::with_capacity(64 * 1024, reader);
-        
+
         // ストリームを消費せずに先頭のバッファを覗き見してLZ4マジックナンバーを確認
         let is_lz4 = {
             let buf = buf_reader.fill_buf()?;
@@ -485,8 +480,9 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
     // .dbファイルをパースし、各種レコードデータを抽出する
     #[cfg(target_arch = "wasm32")]
     pub fn parse_db(&mut self, data: &[u8]) -> io::Result<()> {
-        let is_lz4 = data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) == 0x184D2204;
-        
+        let is_lz4 = data.len() >= 4
+            && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) == 0x184D2204;
+
         if is_lz4 {
             let cursor = std::io::Cursor::new(data);
             let decoder = lz4_flex::frame::FrameDecoder::new(cursor);
@@ -502,341 +498,431 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
 
     fn parse_db_inner<R: BufRead>(&mut self, ctx: &mut ParserContext<R>) -> io::Result<()> {
         let num_records = ctx.read_u32_le()?;
-            
-            let limit = (num_records as usize).min(self.max_nodes);
 
-            self.nodes.clear();
-            self.nodes.reserve(limit + 1);
-            self.hash_table.reserve(limit + 1);
-            self.node_texts.resize(limit + 1, 0xFFFF | (0xFFFF << 16)); // 予め limit+1 個の空データ(0xFFFFFFFF)で埋めておく
-            self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));
-            
-            // 仮想ルート(Index 0)をハッシュ0として確実にテーブルに登録する
-            self.hash_table.insert(0, 0);
+        let limit = (num_records as usize).min(self.max_nodes);
 
-            let mut hash_nexts = Vec::with_capacity(limit + 1);
-            hash_nexts.push(NO_NODE);
+        self.nodes.clear();
+        self.nodes.reserve(limit + 1);
+        self.hash_table.reserve(limit + 1);
+        self.node_texts.resize(limit + 1, 0xFFFF | (0xFFFF << 16)); // 予め limit+1 個の空データ(0xFFFFFFFF)で埋めておく
+        self.nodes
+            .push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0));
 
-            let mut node_stones_data = Vec::<u8>::with_capacity((limit * 10).min(10_000_000));
-            let mut node_stones_index = Vec::<u32>::with_capacity(limit + 2);
-            node_stones_index.push(0);
-            node_stones_index.push(0);
+        // 仮想ルート(Index 0)をハッシュ0として確実にテーブルに登録する
+        self.hash_table.insert(0, 0);
 
-            // 親ノードID, X座標, Y座標, テキストID のフラットなリスト
-            let mut all_btxt: Vec<(usize, i8, i8, u32)> = Vec::with_capacity(limit / 10);
-            let mut temp_stones: Vec<u8> = Vec::with_capacity(225);
+        let mut hash_nexts = Vec::with_capacity(limit + 1);
+        hash_nexts.push(NO_NODE);
 
-            let mut percent_text_ids = [NO_TEXT; 100];
-            // 1%から99%までの勝率文字列を事前確保する
-            for i in 1..100 {
-                let s = format!("{}%", i);
-                percent_text_ids[i] = self.text_pool.get_or_insert(&self.encoding.encode(&s).0);
+        let mut node_stones_data = Vec::<u8>::with_capacity((limit * 10).min(10_000_000));
+        let mut node_stones_index = Vec::<u32>::with_capacity(limit + 2);
+        node_stones_index.push(0);
+        node_stones_index.push(0);
+
+        // 親ノードID, X座標, Y座標, テキストID のフラットなリスト
+        let mut all_btxt: Vec<(usize, i8, i8, u32)> = Vec::with_capacity(limit / 10);
+        let mut temp_stones: Vec<u8> = Vec::with_capacity(225);
+
+        let mut percent_text_ids = [NO_TEXT; 100];
+        // 1%から99%までの勝率文字列を事前確保する
+        for i in 1..100 {
+            let s = format!("{}%", i);
+            percent_text_ids[i] = self.text_pool.get_or_insert(&self.encoding.encode(&s).0);
+        }
+        let id_w = self.text_pool.get_or_insert(&self.encoding.encode("W").0);
+        let id_l = self.text_pool.get_or_insert(&self.encoding.encode("L").0);
+
+        // 1手から225手までの詰み手数字列を事前確保する
+        let mut mate_w_ids = vec![NO_TEXT; 226];
+        let mut mate_l_ids = vec![NO_TEXT; 226];
+        for i in 1..=225 {
+            mate_w_ids[i] = self
+                .text_pool
+                .get_or_insert(&self.encoding.encode(&format!("W{}", i)).0);
+            mate_l_ids[i] = self
+                .text_pool
+                .get_or_insert(&self.encoding.encode(&format!("L{}", i)).0);
+        }
+
+        // テキストやコメントの抽出で使い回すためのバッファ
+        let mut text_buffer = Vec::with_capacity(512);
+
+        // DB内の各レコードを順次解析する
+        for _ in 0..num_records {
+            // 読み込んだノード数が最大許容数に達したか判定する
+            if self.nodes.len() >= self.max_nodes {
+                break;
             }
-            let id_w = self.text_pool.get_or_insert(&self.encoding.encode("W").0);
-            let id_l = self.text_pool.get_or_insert(&self.encoding.encode("L").0);
 
-            // 1手から225手までの詰み手数字列を事前確保する
-            let mut mate_w_ids = vec![NO_TEXT; 226];
-            let mut mate_l_ids = vec![NO_TEXT; 226];
-            for i in 1..=225 {
-                mate_w_ids[i] = self.text_pool.get_or_insert(&self.encoding.encode(&format!("W{}", i)).0);
-                mate_l_ids[i] = self.text_pool.get_or_insert(&self.encoding.encode(&format!("L{}", i)).0);
+            // キー長の読み取りに成功したか検証し、失敗ならループを抜ける
+            let num_key_bytes = match ctx.read_u16_le() {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            // キー長が0の場合はスキップする
+            if num_key_bytes == 0 {
+                continue;
             }
+            // キーバッファの取得に成功したか検証し、失敗ならループを抜ける
+            let key_buffer = match ctx.read_slice(num_key_bytes as usize) {
+                Ok(s) => s,
+                Err(_) => break,
+            };
 
-            // テキストやコメントの抽出で使い回すためのバッファ
-            let mut text_buffer = Vec::with_capacity(512);
+            let mut board = Board::new();
+            let num_stones = (num_key_bytes as i32 - 3) / 2;
+            temp_stones.clear();
 
-            // DB内の各レコードを順次解析する
-            for _ in 0..num_records {
-                // 読み込んだノード数が最大許容数に達したか判定する
-                if self.nodes.len() >= self.max_nodes {
-                    break;
+            // 石データが存在する場合、盤面に配置して状態を構築する
+            if num_stones >= 0 {
+                let num_black = (num_stones as usize + 1) / 2;
+                // 黒石を指定座標に順次配置する
+                for k in 0..num_black {
+                    let bx = key_buffer[3 + k * 2] as i8;
+                    let by = key_buffer[4 + k * 2] as i8;
+                    // 座標が有効であれば着手を盤面に適用する
+                    if bx != -1 && by != -1 {
+                        board.make_move_with_color(bx, by, 0);
+                        temp_stones.push((by as u8) * 15 + (bx as u8));
+                    }
                 }
 
-                // キー長の読み取りに成功したか検証し、失敗ならループを抜ける
-                let num_key_bytes = match ctx.read_u16_le() { Ok(v) => v, Err(_) => break };
-                // キー長が0の場合はスキップする
-                if num_key_bytes == 0 { continue; }
-                // キーバッファの取得に成功したか検証し、失敗ならループを抜ける
-                let key_buffer = match ctx.read_slice(num_key_bytes as usize) { Ok(s) => s, Err(_) => break };
-                
-                let mut board = Board::new();
-                let num_stones = (num_key_bytes as i32 - 3) / 2;
-                temp_stones.clear();
-                
-                // 石データが存在する場合、盤面に配置して状態を構築する
-                if num_stones >= 0 {
-                    let num_black = (num_stones as usize + 1) / 2;
-                    // 黒石を指定座標に順次配置する
-                    for k in 0..num_black {
-                        let bx = key_buffer[3 + k * 2] as i8;
-                        let by = key_buffer[4 + k * 2] as i8;
-                        // 座標が有効であれば着手を盤面に適用する
-                        if bx != -1 && by != -1 {
-                            board.make_move_with_color(bx, by, 0);
-                            temp_stones.push((by as u8) * 15 + (bx as u8));
-                        }
+                let num_white = num_stones as usize / 2;
+                // 白石を指定座標に順次配置する
+                for k in 0..num_white {
+                    let wx = key_buffer[3 + num_black * 2 + k * 2] as i8;
+                    let wy = key_buffer[4 + num_black * 2 + k * 2] as i8;
+                    // 座標が有効であれば着手を盤面に適用する
+                    if wx != -1 && wy != -1 {
+                        board.make_move_with_color(wx, wy, 1);
+                        temp_stones.push((wy as u8) * 15 + (wx as u8));
                     }
-                    
-                    let num_white = num_stones as usize / 2;
-                    // 白石を指定座標に順次配置する
-                    for k in 0..num_white {
-                        let wx = key_buffer[3 + num_black * 2 + k * 2] as i8;
-                        let wy = key_buffer[4 + num_black * 2 + k * 2] as i8;
-                        // 座標が有効であれば着手を盤面に適用する
-                        if wx != -1 && wy != -1 {
-                            board.make_move_with_color(wx, wy, 1);
-                            temp_stones.push((wy as u8) * 15 + (wx as u8));
-                        }
-                    }
-                    
-                    let hash = board.get_canonical_hash();
-                    
-                    // レコードバイト数の読み取りに成功したか検証し、失敗ならループを抜ける
-                    let num_record_bytes = match ctx.read_u16_le() { Ok(v) => v, Err(_) => break };
-                    // レコードバッファの取得に成功したか検証し、失敗ならループを抜ける
-                    let record_buffer = match ctx.read_slice(num_record_bytes as usize) { Ok(s) => s, Err(_) => break };
-                    
-                    let mut text_id: u32 = NO_TEXT;
-                    let mut comment_id: u32 = NO_TEXT;
-                    
-                    // レコードが5バイト以上で評価値情報が含まれているか確認する
-                    if num_record_bytes >= 5 {
-                        let label = record_buffer[0];
-                        let value = i16::from_le_bytes([record_buffer[1], record_buffer[2]]);
-                        let value_mate = 30000;
-                        let value_mate_threshold = 29500;
-                        let abs_val = value.abs();
-                        
-                        // 評価値が詰みの閾値を超えているか判定する
-                        if abs_val > value_mate_threshold {
-                            let steps = (value_mate - abs_val + 1) as usize;
-                            if steps <= 225 {
-                                text_id = if value < 0 { mate_w_ids[steps] } else { mate_l_ids[steps] };
+                }
+
+                let hash = board.get_canonical_hash();
+
+                // レコードバイト数の読み取りに成功したか検証し、失敗ならループを抜ける
+                let num_record_bytes = match ctx.read_u16_le() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                // レコードバッファの取得に成功したか検証し、失敗ならループを抜ける
+                let record_buffer = match ctx.read_slice(num_record_bytes as usize) {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+
+                let mut text_id: u32 = NO_TEXT;
+                let mut comment_id: u32 = NO_TEXT;
+
+                // レコードが5バイト以上で評価値情報が含まれているか確認する
+                if num_record_bytes >= 5 {
+                    let label = record_buffer[0];
+                    let value = i16::from_le_bytes([record_buffer[1], record_buffer[2]]);
+                    let value_mate = 30000;
+                    let value_mate_threshold = 29500;
+                    let abs_val = value.abs();
+
+                    // 評価値が詰みの閾値を超えているか判定する
+                    if abs_val > value_mate_threshold {
+                        let steps = (value_mate - abs_val + 1) as usize;
+                        if steps <= 225 {
+                            text_id = if value < 0 {
+                                mate_w_ids[steps]
                             } else {
-                                let mate_text = if value < 0 { format!("W{}", steps) } else { format!("L{}", steps) };
-                                text_id = self.text_pool.get_or_insert(&self.encoding.encode(&mate_text).0);
-                            }
-                        // ラベルが'W'（白勝ち）であるか判定する
-                        } else if label == b'W' { text_id = id_w; 
-                        // ラベルが'L'（黒勝ち）であるか判定する
-                        } else if label == b'L' { text_id = id_l; 
-                        // 評価値が0以外で勝率計算が必要か判定する
-                        } else if value != 0 {
-                            let k = 250.0;
-                            let win_rate = 1.0 / (1.0 + (- (value as f64) / k).exp());
-                            let win_percent = (win_rate * 100.0).floor() as i32;
-                            // 勝率に応じたテキストID（100%、0%、またはその間の値）を決定する
-                            if win_percent >= 100 { text_id = id_w; } else if win_percent <= 0 { text_id = id_l; } else { text_id = percent_text_ids[win_percent as usize]; }
-                        }
-                          
-                        let text_data = &record_buffer[5..];
-                        // テキストデータが"@BTXT@"マーカーから始まるか判定する
-                        if text_data.starts_with(b"@BTXT@") {
-                            let btxt_end = text_data.iter().position(|&b| b == 0x08).unwrap_or(text_data.len());
-                            let mut idx = 6;
-                            // 改行コードが存在する場合はスキップする
-                            if idx < btxt_end && text_data[idx] == b'\n' { idx += 1; }
-                            
-                            // 文字を16進数の座標へ変換する
-                            fn hex_to_coord(c: u8) -> i8 {
-                                // 指定された文字の範囲に応じて16進数の値を返す
-                                match c {
-                                    b'0'..=b'9' => (c - b'0') as i8,
-                                    b'A'..=b'F' => (c - b'A' + 10) as i8,
-                                    b'a'..=b'f' => (c - b'a' + 10) as i8,
-                                    _ => -1,
-                                }
-                            }
-                            
-                            let p_idx = self.nodes.len();
-                            // 区切り文字までの間、BTXTの各座標・テキストペアを解析する
-                            while idx < btxt_end {
-                                // 座標データ（2文字）が残っているか確認する
-                                if idx + 2 > btxt_end { break; }
-                                let lx = hex_to_coord(text_data[idx]);
-                                let ly = hex_to_coord(text_data[idx + 1]);
-                                // 無効な座標文字が含まれている場合はスキップする
-                                if lx < 0 || ly < 0 { idx += 2; continue; }
-                                idx += 2;
-                                let text_start = idx;
-                                // 改行文字までテキストの末尾を探索する
-                                while idx < btxt_end && text_data[idx] != b'\n' { idx += 1; }
-                                
-                                text_buffer.clear();
-                                for &b in &text_data[text_start..idx] {
-                                    if b != 0 && b != b'\r' {
-                                        text_buffer.push(b);
-                                    }
-                                }
-                                // 次のデータのために改行をスキップする
-                                if idx < btxt_end && text_data[idx] == b'\n' { idx += 1; }
-                                let t_id = self.text_pool.get_or_insert(&text_buffer);
-                                all_btxt.push((p_idx, lx, ly, t_id));
-                            }
-                            
-                            // BTXTマーカー以降に通常のコメントデータが存在するか確認する
-                            if btxt_end + 1 < text_data.len() {
-                                let slice = &text_data[btxt_end + 1..];
-                                let mut len = slice.len();
-                                // "charset="指定が含まれる場合はその前までで切り詰める
-                                if let Some(pos) = slice.windows(8).position(|w| w == b"charset=") { len = pos; }
-                                
-                                text_buffer.clear();
-                                for &b in &slice[..len] {
-                                    if b != 0 && b != b'\r' { text_buffer.push(b); }
-                                }
-                                // コメント文字列が空でなければプールに登録する
-                                if !text_buffer.is_empty() { comment_id = self.text_pool.get_or_insert(&text_buffer); }
-                            }
-                        // BTXTマーカーが存在しない通常のコメントデータを処理する
+                                mate_l_ids[steps]
+                            };
                         } else {
-                             let mut slice = text_data;
-                             // 区切り文字（0x08）が含まれる場合はそれ以降を抽出する
-                             if let Some(pos) = slice.iter().position(|&b| b == 0x08) {
-                                 slice = &slice[pos + 1..];
-                             }
-                             let mut len = slice.len();
-                             // "charset="指定が含まれる場合はその前までで切り詰める
-                             if let Some(pos) = slice.windows(8).position(|w| w == b"charset=") { len = pos; }
-                             
-                             text_buffer.clear();
-                             for &b in &slice[..len] {
-                                 if b != 0 && b != b'\r' { text_buffer.push(b); }
-                             }
-                             // コメント文字列が空でなければプールに登録する
-                             if !text_buffer.is_empty() { comment_id = self.text_pool.get_or_insert(&text_buffer); }
+                            let mate_text = if value < 0 {
+                                format!("W{}", steps)
+                            } else {
+                                format!("L{}", steps)
+                            };
+                            text_id = self
+                                .text_pool
+                                .get_or_insert(&self.encoding.encode(&mate_text).0);
                         }
-                    }
-                    
-                    // 石データもテキストデータも持たない無意味なノードは追加せずスキップする
-                    let has_btxt = all_btxt.last().map_or(false, |&(idx, ..)| idx == self.nodes.len());
-                    if num_stones == 0 && comment_id == NO_TEXT && text_id == NO_TEXT && !has_btxt {
-                        continue;
+                    // ラベルが'W'（白勝ち）であるか判定する
+                    } else if label == b'W' {
+                        text_id = id_w;
+                    // ラベルが'L'（黒勝ち）であるか判定する
+                    } else if label == b'L' {
+                        text_id = id_l;
+                    // 評価値が0以外で勝率計算が必要か判定する
+                    } else if value != 0 {
+                        let k = 250.0;
+                        let win_rate = 1.0 / (1.0 + (-(value as f64) / k).exp());
+                        let win_percent = (win_rate * 100.0).floor() as i32;
+                        // 勝率に応じたテキストID（100%、0%、またはその間の値）を決定する
+                        if win_percent >= 100 {
+                            text_id = id_w;
+                        } else if win_percent <= 0 {
+                            text_id = id_l;
+                        } else {
+                            text_id = percent_text_ids[win_percent as usize];
+                        }
                     }
 
-                    // 初期盤面(hash==0)のレコードは、新規追加せずルート(Index 0)のテキストに統合する
-                    if hash == 0 {
-                        if comment_id != NO_TEXT || text_id != NO_TEXT {
-                            let cid = std::cmp::min(comment_id, 0xFFFF);
-                            let tid = std::cmp::min(text_id, 0xFFFF);
-                            let existing = self.node_texts[0];
-                            let mut ex_cid = existing & 0xFFFF;
-                            let mut ex_tid = (existing >> 16) & 0xFFFF;
-                            
-                            if cid != 0xFFFF { ex_cid = cid; }
-                            if tid != 0xFFFF { ex_tid = tid; }
-                            self.node_texts[0] = ex_cid | (ex_tid << 16);
+                    let text_data = &record_buffer[5..];
+                    // テキストデータが"@BTXT@"マーカーから始まるか判定する
+                    if text_data.starts_with(b"@BTXT@") {
+                        let btxt_end = text_data
+                            .iter()
+                            .position(|&b| b == 0x08)
+                            .unwrap_or(text_data.len());
+                        let mut idx = 6;
+                        // 改行コードが存在する場合はスキップする
+                        if idx < btxt_end && text_data[idx] == b'\n' {
+                            idx += 1;
                         }
-                        continue; 
+
+                        // 文字を16進数の座標へ変換する
+                        fn hex_to_coord(c: u8) -> i8 {
+                            // 指定された文字の範囲に応じて16進数の値を返す
+                            match c {
+                                b'0'..=b'9' => (c - b'0') as i8,
+                                b'A'..=b'F' => (c - b'A' + 10) as i8,
+                                b'a'..=b'f' => (c - b'a' + 10) as i8,
+                                _ => -1,
+                            }
+                        }
+
+                        let p_idx = self.nodes.len();
+                        // 区切り文字までの間、BTXTの各座標・テキストペアを解析する
+                        while idx < btxt_end {
+                            // 座標データ（2文字）が残っているか確認する
+                            if idx + 2 > btxt_end {
+                                break;
+                            }
+                            let lx = hex_to_coord(text_data[idx]);
+                            let ly = hex_to_coord(text_data[idx + 1]);
+                            // 無効な座標文字が含まれている場合はスキップする
+                            if lx < 0 || ly < 0 {
+                                idx += 2;
+                                continue;
+                            }
+                            idx += 2;
+                            let text_start = idx;
+                            // 改行文字までテキストの末尾を探索する
+                            while idx < btxt_end && text_data[idx] != b'\n' {
+                                idx += 1;
+                            }
+
+                            text_buffer.clear();
+                            for &b in &text_data[text_start..idx] {
+                                if b != 0 && b != b'\r' {
+                                    text_buffer.push(b);
+                                }
+                            }
+                            // 次のデータのために改行をスキップする
+                            if idx < btxt_end && text_data[idx] == b'\n' {
+                                idx += 1;
+                            }
+                            let t_id = self.text_pool.get_or_insert(&text_buffer);
+                            all_btxt.push((p_idx, lx, ly, t_id));
+                        }
+
+                        // BTXTマーカー以降に通常のコメントデータが存在するか確認する
+                        if btxt_end + 1 < text_data.len() {
+                            let slice = &text_data[btxt_end + 1..];
+                            let mut len = slice.len();
+                            // "charset="指定が含まれる場合はその前までで切り詰める
+                            if let Some(pos) = slice.windows(8).position(|w| w == b"charset=") {
+                                len = pos;
+                            }
+
+                            text_buffer.clear();
+                            for &b in &slice[..len] {
+                                if b != 0 && b != b'\r' {
+                                    text_buffer.push(b);
+                                }
+                            }
+                            // コメント文字列が空でなければプールに登録する
+                            if !text_buffer.is_empty() {
+                                comment_id = self.text_pool.get_or_insert(&text_buffer);
+                            }
+                        }
+                    // BTXTマーカーが存在しない通常のコメントデータを処理する
+                    } else {
+                        let mut slice = text_data;
+                        // 区切り文字（0x08）が含まれる場合はそれ以降を抽出する
+                        if let Some(pos) = slice.iter().position(|&b| b == 0x08) {
+                            slice = &slice[pos + 1..];
+                        }
+                        let mut len = slice.len();
+                        // "charset="指定が含まれる場合はその前までで切り詰める
+                        if let Some(pos) = slice.windows(8).position(|w| w == b"charset=") {
+                            len = pos;
+                        }
+
+                        text_buffer.clear();
+                        for &b in &slice[..len] {
+                            if b != 0 && b != b'\r' {
+                                text_buffer.push(b);
+                            }
+                        }
+                        // コメント文字列が空でなければプールに登録する
+                        if !text_buffer.is_empty() {
+                            comment_id = self.text_pool.get_or_insert(&text_buffer);
+                        }
                     }
-                    
-                    node_stones_data.extend_from_slice(&temp_stones);
-                    node_stones_index.push(node_stones_data.len() as u32);
-                    
-                    let idx = self.nodes.len();
-                    self.nodes.push(RenLibNode::new(-1, -1, NO_NODE, NO_NODE, NO_NODE, hash, num_stones as u8));
-                    
+                }
+
+                // 石データもテキストデータも持たない無意味なノードは追加せずスキップする
+                let has_btxt = all_btxt
+                    .last()
+                    .map_or(false, |&(idx, ..)| idx == self.nodes.len());
+                if num_stones == 0 && comment_id == NO_TEXT && text_id == NO_TEXT && !has_btxt {
+                    continue;
+                }
+
+                // 初期盤面(hash==0)のレコードは、新規追加せずルート(Index 0)のテキストに統合する
+                if hash == 0 {
                     if comment_id != NO_TEXT || text_id != NO_TEXT {
                         let cid = std::cmp::min(comment_id, 0xFFFF);
                         let tid = std::cmp::min(text_id, 0xFFFF);
-                        let texts = cid | (tid << 16);
-                        
-                        // limit を超えて push される場合への安全対策
-                        if idx < self.node_texts.len() {
-                            self.node_texts[idx] = texts;
-                        } else {
-                            self.node_texts.push(texts);
+                        let existing = self.node_texts[0];
+                        let mut ex_cid = existing & 0xFFFF;
+                        let mut ex_tid = (existing >> 16) & 0xFFFF;
+
+                        if cid != 0xFFFF {
+                            ex_cid = cid;
                         }
+                        if tid != 0xFFFF {
+                            ex_tid = tid;
+                        }
+                        self.node_texts[0] = ex_cid | (ex_tid << 16);
                     }
-                    
-                    let head = self.hash_table.get(&hash).copied().unwrap_or(NO_NODE);
-                    hash_nexts.push(head);
-                    self.hash_table.insert(hash, idx as u32);
-                    
-                // 石データが存在しない場合はレコードの長さ分スキップする
-                } else {
-                    // レコードバイト数の読み取りに成功したか検証し、失敗ならループを抜ける
-                    let num_record_bytes = match ctx.read_u16_le() { Ok(v) => v, Err(_) => break };
-                    let _ = ctx.skip(num_record_bytes as usize);
+                    continue;
                 }
+
+                node_stones_data.extend_from_slice(&temp_stones);
+                node_stones_index.push(node_stones_data.len() as u32);
+
+                let idx = self.nodes.len();
+                self.nodes.push(RenLibNode::new(
+                    -1,
+                    -1,
+                    NO_NODE,
+                    NO_NODE,
+                    NO_NODE,
+                    hash,
+                    num_stones as u8,
+                ));
+
+                if comment_id != NO_TEXT || text_id != NO_TEXT {
+                    let cid = std::cmp::min(comment_id, 0xFFFF);
+                    let tid = std::cmp::min(text_id, 0xFFFF);
+                    let texts = cid | (tid << 16);
+
+                    // limit を超えて push される場合への安全対策
+                    if idx < self.node_texts.len() {
+                        self.node_texts[idx] = texts;
+                    } else {
+                        self.node_texts.push(texts);
+                    }
+                }
+
+                let head = self.hash_table.get(&hash).copied().unwrap_or(NO_NODE);
+                hash_nexts.push(head);
+                self.hash_table.insert(hash, idx as u32);
+
+            // 石データが存在しない場合はレコードの長さ分スキップする
+            } else {
+                // レコードバイト数の読み取りに成功したか検証し、失敗ならループを抜ける
+                let num_record_bytes = match ctx.read_u16_le() {
+                    Ok(v) => v,
+                    Err(_) => break,
+                };
+                let _ = ctx.skip(num_record_bytes as usize);
+            }
+        }
+
+        let absolute_t =
+            self.reconstruct_tree_optimized(&node_stones_data, &node_stones_index, &hash_nexts);
+
+        // 案1：reconstruct完了後、不要になった巨大な一時配列を即座に解放しピークメモリを削減する
+        drop(node_stones_data);
+        drop(node_stones_index);
+        drop(hash_nexts);
+
+        // 1. 親インデックス順にソートする (unstableソートで十分かつ高速)
+        all_btxt.sort_unstable_by_key(|&(p_idx, ..)| p_idx);
+
+        // 2. 同じ親(p_idx)を持つ連続した要素をチャンクとしてまとめて処理する
+        for chunk in all_btxt.chunk_by(|a, b| a.0 == b.0) {
+            let p_idx = chunk[0].0; // チャンク内のすべての要素は同じ p_idx を持つ
+
+            let mut history = Vec::new();
+            let mut curr = p_idx as u32;
+            // 親を辿って初期状態からの着手履歴を構築する
+            while curr != NO_NODE {
+                let n = &self.nodes[curr as usize];
+                // 有効な着手座標であれば履歴に追加する
+                if n.x() >= 0 && n.y() >= 0 {
+                    history.push((n.x(), n.y()));
+                }
+                curr = n.parent;
+            }
+            history.reverse();
+
+            let mut pb = Board::new();
+            // 履歴をもとに盤面状態を復元する（※同じ親に対しては1回だけで済む）
+            for &(hx, hy) in &history {
+                pb.make_move(hx, hy);
             }
 
-            let absolute_t = self.reconstruct_tree_optimized(&node_stones_data, &node_stones_index, &hash_nexts);
+            // チャンク内の各BTXTラベルを処理する
+            for &(_, lx, ly, t_id) in chunk {
+                let root_idx = Zobrist::get_transformed_idx(lx, ly, absolute_t[p_idx] as usize);
+                let root_lx = (root_idx % 15) as i8;
+                let root_ly = (root_idx / 15) as i8;
 
-            // 案1：reconstruct完了後、不要になった巨大な一時配列を即座に解放しピークメモリを削減する
-            drop(node_stones_data);
-            drop(node_stones_index);
-            drop(hash_nexts);
+                pb.make_move(root_lx, root_ly);
+                let target_hash = pb.get_canonical_hash();
+                pb.undo_move(root_lx, root_ly);
 
-            // 1. 親インデックス順にソートする (unstableソートで十分かつ高速)
-            all_btxt.sort_unstable_by_key(|&(p_idx, ..)| p_idx);
-
-            // 2. 同じ親(p_idx)を持つ連続した要素をチャンクとしてまとめて処理する
-            for chunk in all_btxt.chunk_by(|a, b| a.0 == b.0) {
-                let p_idx = chunk[0].0; // チャンク内のすべての要素は同じ p_idx を持つ
-
-                let mut history = Vec::new();
-                let mut curr = p_idx as u32;
-                // 親を辿って初期状態からの着手履歴を構築する
+                let mut curr = self.nodes[p_idx].child;
+                // 親に属する子ノードを走査して対象ハッシュを検索する
                 while curr != NO_NODE {
-                    let n = &self.nodes[curr as usize];
-                    // 有効な着手座標であれば履歴に追加する
-                    if n.x() >= 0 && n.y() >= 0 { history.push((n.x(), n.y())); }
-                    curr = n.parent;
-                }
-                history.reverse();
-                
-                let mut pb = Board::new();
-                // 履歴をもとに盤面状態を復元する（※同じ親に対しては1回だけで済む）
-                for &(hx, hy) in &history { pb.make_move(hx, hy); }
-
-                // チャンク内の各BTXTラベルを処理する
-                for &(_, lx, ly, t_id) in chunk {
-                    let root_idx = Zobrist::get_transformed_idx(lx, ly, absolute_t[p_idx] as usize);
-                    let root_lx = (root_idx % 15) as i8;
-                    let root_ly = (root_idx / 15) as i8;
-
-                    pb.make_move(root_lx, root_ly);
-                    let target_hash = pb.get_canonical_hash();
-                    pb.undo_move(root_lx, root_ly);
-
-                    let mut curr = self.nodes[p_idx].child;
-                    // 親に属する子ノードを走査して対象ハッシュを検索する
-                    while curr != NO_NODE {
-                        // 子ノードのハッシュがターゲットと一致すればテキストIDを設定して探索を終える
-                        if self.nodes[curr as usize].hash == target_hash {
-                            let tid = std::cmp::min(t_id, 0xFFFF);
-                            // idx は配列の範囲内であることが保証されているため、直接アクセス
-                            let texts = &mut self.node_texts[curr as usize];
-                            *texts = (*texts & 0x0000FFFF) | (tid << 16);
-                            break;
-                        }
-                        curr = self.nodes[curr as usize].sibling;
+                    // 子ノードのハッシュがターゲットと一致すればテキストIDを設定して探索を終える
+                    if self.nodes[curr as usize].hash == target_hash {
+                        let tid = std::cmp::min(t_id, 0xFFFF);
+                        // idx は配列の範囲内であることが保証されているため、直接アクセス
+                        let texts = &mut self.node_texts[curr as usize];
+                        *texts = (*texts & 0x0000FFFF) | (tid << 16);
+                        break;
                     }
+                    curr = self.nodes[curr as usize].sibling;
                 }
             }
+        }
 
-            // 追加B：all_btxt処理完了後、不要になった対称変換テーブルとBTXTリストを解放する
-            drop(absolute_t);
-            drop(all_btxt);
+        // 追加B：all_btxt処理完了後、不要になった対称変換テーブルとBTXTリストを解放する
+        drop(absolute_t);
+        drop(all_btxt);
 
-            // 追加A：未使用の余剰キャパシティを解放し、常駐メモリを圧縮する
-            self.hash_table.shrink_to_fit();
-            self.nodes.shrink_to_fit();
-            self.node_texts.shrink_to_fit();
+        // 追加A：未使用の余剰キャパシティを解放し、常駐メモリを圧縮する
+        self.hash_table.shrink_to_fit();
+        self.nodes.shrink_to_fit();
+        self.node_texts.shrink_to_fit();
 
         Ok(())
     }
 
-
-
     // 独立した石データから親子関係と対称性を解決して木構造を再構築する
-    pub fn reconstruct_tree_optimized(&mut self, node_stones_data: &[u8], node_stones_index: &[u32], hash_nexts: &[u32]) -> Vec<u8> {
+    pub fn reconstruct_tree_optimized(
+        &mut self,
+        node_stones_data: &[u8],
+        node_stones_index: &[u32],
+        hash_nexts: &[u32],
+    ) -> Vec<u8> {
         let num_nodes = self.nodes.len();
         let mut absolute_t = vec![0u8; num_nodes];
         // ノードがルートのみなど少なすぎる場合はそのまま返す
-        if num_nodes < 2 { return absolute_t; }
+        if num_nodes < 2 {
+            return absolute_t;
+        }
 
         let mut local_rx = vec![0i8; num_nodes];
         let mut local_ry = vec![0i8; num_nodes];
@@ -851,10 +937,16 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
         // --- 2. Mapフェーズ用の純粋関数（クロージャ） ---
         let map_func = |i: usize| -> Option<ParentSearchResult> {
             let depth_b = nodes_ref[i].depth();
-            if depth_b == 0 { return None; } // 深さが0（初期状態）はスキップ
+            if depth_b == 0 {
+                return None;
+            } // 深さが0（初期状態）はスキップ
 
             let start_idx = node_stones_index[i] as usize;
-            let end_idx = if i + 1 < node_stones_index.len() { node_stones_index[i + 1] as usize } else { node_stones_data.len() };
+            let end_idx = if i + 1 < node_stones_index.len() {
+                node_stones_index[i + 1] as usize
+            } else {
+                node_stones_data.len()
+            };
             let stones_b = if start_idx < end_idx && end_idx <= node_stones_data.len() {
                 &node_stones_data[start_idx..end_idx]
             } else {
@@ -867,11 +959,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
             for (k, &val) in stones_b.iter().enumerate() {
                 let sx = (val % 15) as i8;
                 let sy = (val / 15) as i8;
-                let color = if k < num_black_total { 0 } else { 1 }; 
+                let color = if k < num_black_total { 0 } else { 1 };
                 temp_board.make_move_with_color(sx, sy, color);
             }
             let hashes_b = temp_board.hashes;
-            
+
             let color_to_remove = (depth_b - 1) % 2;
             let num_black = (depth_b as usize + 1) / 2;
 
@@ -879,7 +971,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
             let stones_to_check = if color_to_remove == 0 {
                 &stones_b[0..num_black.min(stones_b.len())]
             } else {
-                if num_black <= stones_b.len() { &stones_b[num_black..] } else { &[] }
+                if num_black <= stones_b.len() {
+                    &stones_b[num_black..]
+                } else {
+                    &[]
+                }
             };
 
             // 候補となる石を1つずつ取り除き、親のハッシュを探索する
@@ -888,12 +984,18 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                 let ry = (val / 15) as i8;
                 let mut min_h = u64::MAX;
                 let t_table = Zobrist::transformed_table();
-                let cell_hashes = unsafe { t_table.get_unchecked((ry as usize * 15) + rx as usize) };
-                
+                let cell_hashes =
+                    unsafe { t_table.get_unchecked((ry as usize * 15) + rx as usize) };
+
                 for k in 0..8 {
                     unsafe {
-                        let h_p_sym = hashes_b.get_unchecked(k) ^ cell_hashes.get_unchecked(color_to_remove as usize).get_unchecked(k);
-                        if h_p_sym < min_h { min_h = h_p_sym; }
+                        let h_p_sym = hashes_b.get_unchecked(k)
+                            ^ cell_hashes
+                                .get_unchecked(color_to_remove as usize)
+                                .get_unchecked(k);
+                        if h_p_sym < min_h {
+                            min_h = h_p_sym;
+                        }
                     }
                 }
 
@@ -901,7 +1003,7 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                 if let Some(&head_u32) = hash_table_ref.get(&min_h) {
                     let mut p_idx_u32 = head_u32;
                     let mut valid_p_idx = NO_NODE;
-                    
+
                     // チェインを辿り、深さが「自分の深さ - 1」のノードを正しい親として選択する
                     while p_idx_u32 != NO_NODE {
                         if nodes_ref[p_idx_u32 as usize].depth() == depth_b - 1 {
@@ -910,7 +1012,7 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                         }
                         p_idx_u32 = hash_nexts[p_idx_u32 as usize];
                     }
-                    
+
                     // 正しい親が見つかった場合のみリンク処理を行う
                     if valid_p_idx != NO_NODE {
                         let p_idx = valid_p_idx as usize;
@@ -919,7 +1021,11 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                         let p_depth = nodes_ref[p_idx].depth();
                         let p_num_black = (p_depth as usize + 1) / 2;
                         let p_start = node_stones_index[p_idx] as usize;
-                        let p_end = if p_idx + 1 < node_stones_index.len() { node_stones_index[p_idx + 1] as usize } else { node_stones_data.len() };
+                        let p_end = if p_idx + 1 < node_stones_index.len() {
+                            node_stones_index[p_idx + 1] as usize
+                        } else {
+                            node_stones_data.len()
+                        };
                         let stones_p = if p_start < p_end && p_end <= node_stones_data.len() {
                             &node_stones_data[p_start..p_end]
                         } else {
@@ -937,11 +1043,14 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
 
                         let mut best_t: usize = 0;
                         for t in 0..8 {
-                            if p_hashes[t] == target_hash { best_t = t; break; }
+                            if p_hashes[t] == target_hash {
+                                best_t = t;
+                                break;
+                            }
                         }
 
                         let inv_t = [0, 3, 2, 1, 4, 5, 6, 7][best_t];
-                        
+
                         // 副作用を起こさずに結果を返す
                         return Some(ParentSearchResult {
                             parent_idx: p_idx as u32,
@@ -965,28 +1074,33 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
                     ry,
                 });
             }
-            
+
             None
         };
 
         // --- 3. 並列 Map フェーズ ---
         // Wasm環境とネイティブ環境でコンパイルを分岐させます
-        #[cfg(not(target_arch = "wasm32"))]
-        let results: Vec<Option<ParentSearchResult>> = (1..num_nodes).into_par_iter().map(map_func).collect();
+        #[cfg(all(
+            not(target_arch = "wasm32"),
+            not(target_os = "android"),
+            not(target_os = "ios")
+        ))]
+        let results: Vec<Option<ParentSearchResult>> =
+            (1..num_nodes).into_par_iter().map(map_func).collect();
 
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(any(target_arch = "wasm32", target_os = "android", target_os = "ios"))]
         let results: Vec<Option<ParentSearchResult>> = (1..num_nodes).map(map_func).collect();
 
         // --- 4. 逐次 Reduce / Apply フェーズ ---
         // O(1)で末尾に兄弟を追加するためのキャッシュ配列
-        let mut last_child = vec![NO_NODE; num_nodes]; 
+        let mut last_child = vec![NO_NODE; num_nodes];
 
         // ここで初めて self.nodes を可変借用し、安全にリンクを繋ぎます
         for (i_minus_1, res) in results.into_iter().enumerate() {
             let i = i_minus_1 + 1;
             if let Some(r) = res {
                 let p_idx = r.parent_idx as usize;
-                
+
                 self.nodes[i].parent = r.parent_idx;
                 edge_inv_t[i] = r.inv_t;
                 local_rx[i] = r.rx;
@@ -1014,12 +1128,13 @@ fn read_node_from_slice(&mut self, data: &[u8], offset: &mut usize) -> Option<No
             // 全ての子ノードに対して対称性に基づく絶対座標を適用する
             while child_opt != NO_NODE {
                 let c_idx = child_opt as usize;
-                let t_to_root = Zobrist::compose_t(edge_inv_t[c_idx] as usize, absolute_t[curr] as usize);
+                let t_to_root =
+                    Zobrist::compose_t(edge_inv_t[c_idx] as usize, absolute_t[curr] as usize);
                 absolute_t[c_idx] = t_to_root as u8;
 
                 let rx = local_rx[c_idx];
                 let ry = local_ry[c_idx];
-                
+
                 // 座標が負（パス）の場合はそのまま設定する
                 if rx < 0 || ry < 0 {
                     self.nodes[c_idx].set_x(-1);

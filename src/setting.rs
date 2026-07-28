@@ -1,18 +1,18 @@
 // アプリケーションの設定、永続化、および表示オプションの管理を行う
+use crate::lang;
 use eframe::egui;
 use serde::{Deserialize, Serialize};
-use crate::lang;
- 
+
 fn get_system_fonts() -> Vec<(String, String)> {
     let mut fonts = Vec::new();
-    
+
     #[cfg(target_os = "windows")]
     {
-        use winreg::enums::*;
-        use winreg::RegKey;
-        use winreg::types::FromRegValue;
-        use winreg::HKEY;
         use std::path::Path;
+        use winreg::HKEY;
+        use winreg::RegKey;
+        use winreg::enums::*;
+        use winreg::types::FromRegValue;
 
         // システムフォルダとユーザーフォルダのパスを用意
         let system_fonts_dir = "C:\\Windows\\Fonts".to_string();
@@ -53,24 +53,26 @@ fn get_system_fonts() -> Vec<(String, String)> {
 
         // 1. システム全体（全ユーザー）のフォントを読み込む
         load_fonts(
-            HKEY_LOCAL_MACHINE, 
-            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 
-            &system_fonts_dir
+            HKEY_LOCAL_MACHINE,
+            "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+            &system_fonts_dir,
         );
 
         // 2. 現在のユーザー専用のフォントを読み込む
         load_fonts(
-            HKEY_CURRENT_USER, 
-            "Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", 
-            &user_fonts_dir
+            HKEY_CURRENT_USER,
+            "Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+            &user_fonts_dir,
         );
     }
-    
+
     // アルファベット順にソート
-    fonts.sort_by(|a: &(String, String), b: &(String, String)| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    fonts.sort_by(|a: &(String, String), b: &(String, String)| {
+        a.1.to_lowercase().cmp(&b.1.to_lowercase())
+    });
     // 同名フォントの重複を排除
     fonts.dedup_by(|a, b| a.1 == b.1);
-    
+
     fonts
 }
 
@@ -87,11 +89,11 @@ fn settings_path() -> std::path::PathBuf {
 /// テキスト・コメントのエンコーディング（言語）
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum TextEncoding {
-    ShiftJIS,   // 日本語 (Shift_JIS)
-    UTF8,       // UTF-8 (多言語)
-    GBK,        // 中国語簡体字 (GBK)
-    Big5,       // 中国語繁体字 (Big5)
-    EucKR,      // 韓国語 (EUC-KR)
+    ShiftJIS, // 日本語 (Shift_JIS)
+    UTF8,     // UTF-8 (多言語)
+    GBK,      // 中国語簡体字 (GBK)
+    Big5,     // 中国語繁体字 (Big5)
+    EucKR,    // 韓国語 (EUC-KR)
 }
 
 impl TextEncoding {
@@ -126,13 +128,30 @@ impl TextEncoding {
 }
 
 /// ディスクに保存される設定データ
-fn default_true() -> bool { true }
-fn default_top_branch_highlight_count() -> usize { 3 }
-fn default_vcf_depth() -> usize { 61 }
-fn default_vcf_timeout_secs() -> u64 { 120 }
-
+fn default_true() -> bool {
+    true
+}
+fn default_top_branch_highlight_count() -> usize {
+    3
+}
+fn default_vcf_depth() -> usize {
+    61
+}
+fn default_vcf_timeout_secs() -> u64 {
+    120
+}
+fn default_vcf_mode() -> VcfMode {
+    VcfMode::Shortest
+}
+fn default_vct_depth() -> usize {
+    30
+}
+fn default_vct_timeout_secs() -> u64 {
+    120
+}
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum VcfMode {
+    FirstWin,
     Shortest,
     Long,
 }
@@ -159,6 +178,8 @@ struct SettingsData {
     pub font_path: String,
     #[serde(default = "default_wasm_button_size")]
     pub wasm_button_size: f32,
+    #[serde(default = "default_android_button_size")]
+    pub android_button_size: f32,
     #[serde(default = "default_true")]
     pub show_branches: bool,
     #[serde(default = "default_true")]
@@ -171,12 +192,16 @@ struct SettingsData {
     pub last_move_color: [f32; 3],
     #[serde(default = "default_true")]
     pub show_forbidden_points: bool,
-    #[serde(default)]
+    #[serde(default = "default_vcf_mode")]
     pub vcf_mode: VcfMode,
     #[serde(default = "default_vcf_depth")]
     pub vcf_depth: usize,
     #[serde(default = "default_vcf_timeout_secs")]
     pub vcf_timeout_secs: u64,
+    #[serde(default = "default_vct_depth")]
+    pub vct_depth: usize,
+    #[serde(default = "default_vct_timeout_secs")]
+    pub vct_timeout_secs: u64,
 }
 
 fn default_max_nodes() -> usize {
@@ -192,6 +217,10 @@ fn default_font_path() -> String {
 
 fn default_wasm_button_size() -> f32 {
     40.0
+}
+
+fn default_android_button_size() -> f32 {
+    20.0
 }
 
 fn default_language() -> lang::Language {
@@ -221,8 +250,9 @@ pub struct Settings {
     /// 設定ウィンドウの表示状態
     pub show_window: bool,
     #[allow(dead_code)]
-    pub available_fonts: Vec<(String, String)>, 
+    pub available_fonts: Vec<(String, String)>,
     pub wasm_button_size: f32,
+    pub android_button_size: f32,
     pub show_branches: bool,
     pub show_branch_text: bool,
     pub show_branch_count: bool,
@@ -232,6 +262,10 @@ pub struct Settings {
     pub vcf_mode: VcfMode,
     pub vcf_depth: usize,
     pub vcf_timeout_secs: u64,
+    /// Quintet VCT's attacker-depth bound.
+    pub vct_depth: usize,
+    /// Quintet VCT's wall-clock limit in seconds.
+    pub vct_timeout_secs: u64,
 }
 
 impl Default for Settings {
@@ -247,15 +281,18 @@ impl Default for Settings {
             show_window: false,
             available_fonts: get_system_fonts(),
             wasm_button_size: 40.0,
+            android_button_size: 20.0,
             show_branches: true,
             show_branch_text: true,
             show_branch_count: true,
             top_branch_highlight_count: 3,
             last_move_color: [1.0, 0.0, 0.0],
             show_forbidden_points: true,
-            vcf_mode: VcfMode::Shortest,
+            vcf_mode: default_vcf_mode(),
             vcf_depth: default_vcf_depth(),
             vcf_timeout_secs: default_vcf_timeout_secs(),
+            vct_depth: default_vct_depth(),
+            vct_timeout_secs: default_vct_timeout_secs(),
         }
     }
 }
@@ -264,7 +301,7 @@ impl Settings {
     /// ファイルから設定を読み込む。失敗時はデフォルト値を返す。
     pub fn load() -> Self {
         let fonts = get_system_fonts();
-        
+
         // --- ネイティブ（Windows等）の読み込み ---
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -279,7 +316,8 @@ impl Settings {
         // --- Wasm（ブラウザ）の読み込み ---
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+            {
                 if let Ok(Some(json)) = storage.get_item("renju_settings") {
                     if let Ok(data) = serde_json::from_str::<SettingsData>(&json) {
                         return Self::from_data(data, fonts);
@@ -287,7 +325,7 @@ impl Settings {
                 }
             }
         }
-        
+
         Self::default()
     }
 
@@ -301,6 +339,7 @@ impl Settings {
             max_nodes: self.max_nodes,
             font_path: self.font_path.clone(),
             wasm_button_size: self.wasm_button_size,
+            android_button_size: self.android_button_size,
             show_branches: self.show_branches,
             show_branch_text: self.show_branch_text,
             show_branch_count: self.show_branch_count,
@@ -310,8 +349,10 @@ impl Settings {
             vcf_mode: self.vcf_mode,
             vcf_depth: self.vcf_depth,
             vcf_timeout_secs: self.vcf_timeout_secs,
+            vct_depth: self.vct_depth,
+            vct_timeout_secs: self.vct_timeout_secs,
         };
-        
+
         if let Ok(json) = serde_json::to_string_pretty(&data) {
             // --- ネイティブの保存 ---
             #[cfg(not(target_arch = "wasm32"))]
@@ -322,7 +363,9 @@ impl Settings {
             // --- Wasmの保存 ---
             #[cfg(target_arch = "wasm32")]
             {
-                if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                if let Some(storage) =
+                    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+                {
                     let _ = storage.set_item("renju_settings", &json);
                 }
             }
@@ -342,6 +385,7 @@ impl Settings {
             show_window: false,
             available_fonts: fonts,
             wasm_button_size: data.wasm_button_size,
+            android_button_size: data.android_button_size,
             show_branches: data.show_branches,
             show_branch_text: data.show_branch_text,
             show_branch_count: data.show_branch_count,
@@ -351,6 +395,8 @@ impl Settings {
             vcf_mode: data.vcf_mode,
             vcf_depth: data.vcf_depth,
             vcf_timeout_secs: data.vcf_timeout_secs,
+            vct_depth: data.vct_depth,
+            vct_timeout_secs: data.vct_timeout_secs,
         }
     }
 
@@ -405,19 +451,24 @@ impl Settings {
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
                         ui.label(tr.top_branch_highlight_count);
-                        ui.add(egui::DragValue::new(&mut self.top_branch_highlight_count).range(0..=15));
+                        ui.add(
+                            egui::DragValue::new(&mut self.top_branch_highlight_count)
+                                .range(0..=15),
+                        );
                     });
                 }
 
-               #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(not(target_arch = "wasm32"))]
                 {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.heading(tr.font_section);
                     ui.horizontal(|ui| {
                         ui.label(tr.font_label);
-                        
-                        let current_display = self.available_fonts.iter()
+
+                        let current_display = self
+                            .available_fonts
+                            .iter()
                             .find(|(path, _)| path == &self.font_path)
                             .map(|(_, name)| name.clone())
                             .unwrap_or_else(|| {
@@ -429,7 +480,7 @@ impl Settings {
                             });
 
                         egui::ComboBox::from_id_salt("font_combo")
-                            .width(200.0) 
+                            .width(200.0)
                             .selected_text(&current_display)
                             .show_ui(ui, |ui| {
                                 for (path, name) in &self.available_fonts {
@@ -459,6 +510,18 @@ impl Settings {
 
                 ui.add_space(8.0);
                 ui.separator();
+                ui.heading(tr.vct_section);
+                ui.horizontal(|ui| {
+                    ui.label(tr.vct_depth);
+                    ui.add(egui::DragValue::new(&mut self.vct_depth).range(1..=225));
+                });
+                ui.horizontal(|ui| {
+                    ui.label(tr.vct_timeout);
+                    ui.add(egui::DragValue::new(&mut self.vct_timeout_secs).range(1..=3600));
+                });
+
+                ui.add_space(8.0);
+                ui.separator();
                 ui.heading(tr.encoding_section);
                 ui.horizontal(|ui| {
                     ui.label(tr.max_nodes_label);
@@ -467,7 +530,11 @@ impl Settings {
                     } else {
                         100_000..=usize::MAX
                     };
-                    ui.add(egui::DragValue::new(&mut self.max_nodes).speed(10000).range(range));
+                    ui.add(
+                        egui::DragValue::new(&mut self.max_nodes)
+                            .speed(10000)
+                            .range(range),
+                    );
                 });
                 ui.add_space(4.0);
                 ui.label(tr.encoding_label);
@@ -492,7 +559,7 @@ impl Settings {
                             }
                         });
                 });
- 
+
                 #[cfg(target_arch = "wasm32")]
                 {
                     ui.add_space(8.0);
@@ -501,6 +568,20 @@ impl Settings {
                     ui.horizontal(|ui| {
                         ui.label("Toolbar Button Size:");
                         ui.add(egui::Slider::new(&mut self.wasm_button_size, 20.0..=80.0));
+                    });
+                }
+
+                #[cfg(target_os = "android")]
+                {
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.heading("UI Layout (Android)");
+                    ui.horizontal(|ui| {
+                        ui.label("Toolbar Button Size:");
+                        ui.add(egui::Slider::new(
+                            &mut self.android_button_size,
+                            14.0..=48.0,
+                        ));
                     });
                 }
 

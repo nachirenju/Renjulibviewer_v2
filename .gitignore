@@ -4,7 +4,23 @@
 # --- Trunk (Wasm) ---
 /dist/
 
+# --- Android / Gradle ---
+android/
+build.gradle
+gradle.properties
+settings.gradle
+scripts/
+.gradle/
+build/
+local.properties
+
+# --- iOS ---
+ios/
+
 # --- IDEs / Editors ---
+/.agent/
+/.agents/
+/.codex/
 /.vscode/
 /.idea/
 /*.swp
@@ -20,3 +36,16 @@ Thumbs.db
 /*.pdb
 /*.rs.bk
 /renju_lz4_temp_*
+
+# --- Local credentials / signing material ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+key.properties
+service-account*.json

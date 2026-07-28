@@ -56,7 +56,7 @@ impl TextPool {
             let mut current_id = first_id;
             loop {
                 let (offset, len) = self.spans[current_id as usize];
-                let existing = &self.buffer[offset as usize .. (offset + len) as usize];
+                let existing = &self.buffer[offset as usize..(offset + len) as usize];
                 if existing == text {
                     return current_id; // 完全一致 → 既存IDを返す
                 }
@@ -76,7 +76,7 @@ impl TextPool {
 
         self.buffer.extend_from_slice(text);
         self.spans.push((offset, len));
-        
+
         // 衝突時チェインの更新（先頭に追加していくスタイル）
         if let Some(&existing_first_id) = self.lookup.get(&hash) {
             self.next_chain.push(existing_first_id);
@@ -93,7 +93,7 @@ impl TextPool {
             None
         } else {
             let (offset, len) = self.spans[id as usize];
-            Some(&self.buffer[offset as usize .. (offset + len) as usize])
+            Some(&self.buffer[offset as usize..(offset + len) as usize])
         }
     }
 }
@@ -101,12 +101,12 @@ impl TextPool {
 /// 24バイトに極限圧縮された局面ノード (Hot Data分離版)
 #[derive(Debug, Clone)]
 pub struct RenLibNode {
-    pub hash: u64,          // 8 bytes
-    pub parent: u32,        // 4 bytes
-    pub child: u32,         // 4 bytes
-    pub sibling: u32,       // 4 bytes
+    pub hash: u64,    // 8 bytes
+    pub parent: u32,  // 4 bytes
+    pub child: u32,   // 4 bytes
+    pub sibling: u32, // 4 bytes
     // x (8 bit) + y (8 bit) + depth (8 bit) + 予約領域 (8 bit)
-    pub move_info: u32,     // 4 bytes
+    pub move_info: u32, // 4 bytes
 } // Total: 24 bytes!
 
 impl RenLibNode {
@@ -116,27 +116,41 @@ impl RenLibNode {
         let uy = y as u8 as u32;
         let ud = depth as u32;
         let move_info = ux | (uy << 8) | (ud << 16);
-        
-        Self { hash, parent, child, sibling, move_info }
+
+        Self {
+            hash,
+            parent,
+            child,
+            sibling,
+            move_info,
+        }
     }
 
-    #[inline(always)] pub fn x(&self) -> i8 { (self.move_info & 0xFF) as i8 }
-    #[inline(always)] pub fn y(&self) -> i8 { ((self.move_info >> 8) & 0xFF) as i8 }
-    #[inline(always)] pub fn depth(&self) -> u8 { ((self.move_info >> 16) & 0xFF) as u8 }
-    
+    #[inline(always)]
+    pub fn x(&self) -> i8 {
+        (self.move_info & 0xFF) as i8
+    }
+    #[inline(always)]
+    pub fn y(&self) -> i8 {
+        ((self.move_info >> 8) & 0xFF) as i8
+    }
+    #[inline(always)]
+    pub fn depth(&self) -> u8 {
+        ((self.move_info >> 16) & 0xFF) as u8
+    }
+
     #[inline(always)]
     pub fn set_x(&mut self, x: i8) {
         self.move_info = (self.move_info & 0xFFFFFF00) | (x as u8 as u32);
     }
-    
+
     #[inline(always)]
     pub fn set_y(&mut self, y: i8) {
         self.move_info = (self.move_info & 0xFFFF00FF) | ((y as u8 as u32) << 8);
     }
-    
+
     #[inline(always)]
     pub fn set_depth(&mut self, depth: u8) {
         self.move_info = (self.move_info & 0xFF00FFFF) | ((depth as u32) << 16);
     }
-
 }

@@ -10,7 +10,7 @@ pub enum Player {
 pub struct Board {
     pub grid: [Option<Player>; SIZE * SIZE],
     pub next_player: Player,
-    pub history: Vec<usize>, // 履歴を追加
+    pub history: Vec<usize>,        // 履歴を追加
     pub future_history: Vec<usize>, // 取り消した手の履歴
 }
 
