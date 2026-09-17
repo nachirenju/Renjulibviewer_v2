@@ -3,6 +3,38 @@ use crate::ExportState;
 use crate::core::{HashBoard, NO_NODE, NO_TEXT, RenLibNode};
 use crate::lang;
 use eframe::egui;
+
+pub fn draw_start_player_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
+    if !app.settings.choose_start_player {
+        return;
+    }
+    let tr = app.settings.tr();
+    let mut selected = None;
+    let mut cancelled = false;
+    let response = egui::Modal::new(egui::Id::new("start_player_dialog")).show(ctx, |ui| {
+        ui.heading(tr.start_player_title);
+        ui.label(tr.start_player_prompt);
+        ui.horizontal(|ui| {
+            if ui.button(tr.start_black).clicked() {
+                selected = Some(crate::board::Player::Black);
+            }
+            if ui.button(tr.start_white).clicked() {
+                selected = Some(crate::board::Player::White);
+            }
+            if ui.button(tr.cancel).clicked() {
+                cancelled = true;
+            }
+        });
+    });
+    if let Some(player) = selected {
+        app.board.begin_sequence(player);
+        app.settings.free_placement = false;
+        app.settings.choose_start_player = false;
+        app.clear_vcf_solution();
+    } else if cancelled || response.should_close() {
+        app.settings.choose_start_player = false;
+    }
+}
 pub fn draw_about_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
     if app.show_about {
         let tr = app.settings.tr();

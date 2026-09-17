@@ -104,15 +104,50 @@ fn solve_quintet_dfpn(
             }
         },
     );
+    let stats = match &result {
+        quintet::mate::VCTSearchResult::Completed(_, stats)
+        | quintet::mate::VCTSearchResult::Stopped(_, stats) => *stats,
+    };
+    #[cfg(target_os = "windows")]
+    remember_vct_trace_line(format!(
+        "[quintet-vct-candidates] attack_lists={} attack_before_dedup={} attack_after_dedup={} defence_lists={} defence_before_dedup={} defence_after_dedup={} positive_vcf_cache_hits={}",
+        stats.attack_candidate_lists,
+        stats.attack_candidates_before_dedup,
+        stats.attack_candidates_after_dedup,
+        stats.defence_candidate_lists,
+        stats.defence_candidates_before_dedup,
+        stats.defence_candidates_after_dedup,
+        stats.positive_vcf_cache_hits,
+    ));
+    #[cfg(target_os = "windows")]
+    remember_vct_trace_line(format!(
+        "[quintet-vct-selector] attack_full_scans={} attack_cache_hits={} attack_incremental_updates={} attack_child_lookups={} defence_full_scans={} defence_cache_hits={} defence_incremental_updates={} defence_child_lookups={}",
+        stats.attack_selector_full_scans,
+        stats.attack_selector_cache_hits,
+        stats.attack_selector_incremental_updates,
+        stats.attack_selector_child_lookups,
+        stats.defence_selector_full_scans,
+        stats.defence_selector_cache_hits,
+        stats.defence_selector_incremental_updates,
+        stats.defence_selector_child_lookups,
+    ));
+    #[cfg(not(target_os = "windows"))]
+    let _ = stats;
     match result {
-        quintet::mate::VCTSearchResult::Completed(Some(mate)) => {
+        quintet::mate::VCTSearchResult::Completed(Some(mate), _) => {
             Ok(moves_from_quintet_points(mate.path(), turn).filter(|path| !path.is_empty()))
         }
-        quintet::mate::VCTSearchResult::Completed(None) => Ok(None),
-        quintet::mate::VCTSearchResult::Stopped(quintet::mate::VCTSearchStop::Cancelled) => {
+        quintet::mate::VCTSearchResult::Completed(None, _) => Ok(None),
+        quintet::mate::VCTSearchResult::Stopped(
+            quintet::mate::VCTSearchStop::Cancelled,
+            _,
+        ) => {
             Err(SolveOutcome::Cancelled)
         }
-        quintet::mate::VCTSearchResult::Stopped(quintet::mate::VCTSearchStop::TimedOut) => {
+        quintet::mate::VCTSearchResult::Stopped(
+            quintet::mate::VCTSearchStop::TimedOut,
+            _,
+        ) => {
             Err(SolveOutcome::Timeout)
         }
     }

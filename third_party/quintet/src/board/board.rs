@@ -130,6 +130,21 @@ impl Board {
         zobrist::apply_n(self.z_hash, n)
     }
 
+    /// Returns the hash obtained by putting `r` on `p` and applying the
+    /// remaining-depth component, without cloning or mutating the board.
+    ///
+    /// `put_mut` replaces an existing stone, so mirror that behavior here as
+    /// well. VCT candidates are normally empty, but keeping the operation
+    /// identical makes this safe for every caller.
+    pub fn zobrist_hash_after_put_n(&self, r: Player, p: Point, n: u8) -> u64 {
+        let mut hash = self.z_hash;
+        if let Some(previous) = self.stone(p) {
+            hash = zobrist::apply_move(hash, previous, p);
+        }
+        hash = zobrist::apply_move(hash, r, p);
+        zobrist::apply_n(hash, n)
+    }
+
     fn update_z_hash(&mut self, r: Player, p: Point) {
         self.z_hash = zobrist::apply_move(self.z_hash, r, p);
     }
@@ -329,6 +344,25 @@ mod tests {
         board.put_mut(White, Point(8, 8));
         let hash7 = board.zobrist_hash();
         assert_eq!(hash7, hash5);
+    }
+
+    #[test]
+    fn direct_child_zobrist_hash_matches_put_for_empty_and_occupied_points() {
+        let mut board = Board::new();
+        board.put_mut(Black, Point(7, 7));
+        board.put_mut(White, Point(8, 8));
+
+        for &(player, point, n) in &[
+            (Black, Point(6, 7), 30),
+            (White, Point(9, 8), 29),
+            (Black, Point(8, 8), 11),
+            (White, Point(7, 7), 10),
+        ] {
+            let direct = board.zobrist_hash_after_put_n(player, point, n);
+            let mut played = board.clone();
+            played.put_mut(player, point);
+            assert_eq!(direct, played.zobrist_hash_n(n));
+        }
     }
 
     #[test]

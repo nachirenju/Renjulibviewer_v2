@@ -3,16 +3,16 @@ use crate::board::*;
 use crate::mate::game::*;
 use crate::mate::mate::*;
 use crate::mate::state::State;
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 pub struct DFSSolver {
-    deadends: HashSet<u64>,
+    deadends: FxHashSet<u64>,
 }
 
 impl DFSSolver {
     pub fn init() -> Self {
         Self {
-            deadends: HashSet::new(),
+            deadends: FxHashSet::default(),
         }
     }
 

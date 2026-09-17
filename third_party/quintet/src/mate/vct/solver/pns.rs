@@ -1,6 +1,5 @@
-use crate::board::Point;
 use crate::mate::vcf;
-use crate::mate::vct::generator::Generator;
+use crate::mate::vct::generator::{CandidateResult, Generator};
 use crate::mate::vct::helper::VCFHelper;
 use crate::mate::vct::observer::SearchObserver;
 use crate::mate::vct::proof::*;
@@ -18,8 +17,8 @@ pub struct PNSVCTSolver {
     defender_vcf_depth: u8,
     attacker_vcf_solver: vcf::IDDFSSolver,
     defender_vcf_solver: vcf::IDDFSSolver,
-    attacks_cache: LruCache<u64, Result<Vec<Point>, Node>>,
-    defences_cache: LruCache<u64, Result<Vec<Point>, Node>>,
+    attacks_cache: LruCache<u64, CandidateResult>,
+    defences_cache: LruCache<u64, CandidateResult>,
 }
 
 impl PNSVCTSolver {
@@ -46,11 +45,11 @@ impl SearchObserver for PNSVCTSolver {}
 impl Selector for PNSVCTSolver {}
 
 impl Generator for PNSVCTSolver {
-    fn attacks_cache(&mut self) -> &mut LruCache<u64, Result<Vec<Point>, Node>> {
+    fn attacks_cache(&mut self) -> &mut LruCache<u64, CandidateResult> {
         &mut self.attacks_cache
     }
 
-    fn defences_cache(&mut self) -> &mut LruCache<u64, Result<Vec<Point>, Node>> {
+    fn defences_cache(&mut self) -> &mut LruCache<u64, CandidateResult> {
         &mut self.defences_cache
     }
 }

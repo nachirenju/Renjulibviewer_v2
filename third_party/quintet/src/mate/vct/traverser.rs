@@ -6,9 +6,9 @@ pub use dfpns::DFPNSTraverser;
 pub use dfs::DFSTraverser;
 pub use pns::PNSTraverser;
 
+use super::generator::Candidate;
 use super::observer::SearchObserver;
 use super::selector::*;
-use crate::board::Point;
 use crate::mate::state::State;
 use crate::mate::vct::proof::*;
 use crate::mate::vct::state::VCTState;
@@ -20,7 +20,7 @@ pub trait Traverser: Selector + SearchObserver {
     fn traverse_attacks<F>(
         &mut self,
         state: &mut VCTState,
-        attacks: &[Point],
+        attacks: &[Candidate],
         threshold: Node,
         search_defences: F,
     ) -> Selection
@@ -50,7 +50,7 @@ pub trait Traverser: Selector + SearchObserver {
     fn traverse_defences<F>(
         &mut self,
         state: &mut VCTState,
-        defences: &[Point],
+        defences: &[Candidate],
         threshold: Node,
         search_defences: F,
     ) -> Selection

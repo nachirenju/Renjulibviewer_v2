@@ -106,6 +106,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "num_enum",
+ "simd_cesu8",
  "thiserror 2.0.18",
 ]
 
@@ -702,8 +703,6 @@ dependencies = [
 [[package]]
 name = "eframe"
 version = "0.30.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2f2d9e7ea2d11ec9e98a8683b6eb99f9d7d0448394ef6e0d6d91bd4eb817220"
 dependencies = [
  "ahash 0.8.12",
  "bytemuck",
@@ -2268,6 +2267,7 @@ name = "quintet"
 version = "0.0.0-dev"
 dependencies = [
  "lru",
+ "rustc-hash",
  "wasm-bindgen",
 ]
 
@@ -3494,8 +3494,6 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6755fa58a9f8350bd1e472d4c3fcc25f824ec358933bba33306d0b63df5978d"
 dependencies = [
  "android-activity",
  "atomic-waker",

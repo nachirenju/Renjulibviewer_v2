@@ -3,6 +3,125 @@ use crate::ExportState;
 use crate::core::NO_NODE;
 use crate::lang;
 use eframe::egui;
+
+/// Draws the VCF/VCT solution navigation.  On narrow touch screens this is
+/// deliberately kept as one unit on its own row, so the controls do not get
+/// split by the search buttons or status text.
+fn draw_vcf_replay_controls(
+    ui: &mut egui::Ui,
+    app: &mut crate::RenjuApp,
+    tr: &lang::Tr,
+    btn_size: f32,
+) {
+    if app.vcf_solving || app.vcf_solution.is_empty() {
+        return;
+    }
+
+    if ui
+        .add_enabled(
+            app.vcf_replay_len > 0,
+            egui::Button::new(egui::RichText::new("⏮").size(btn_size)),
+        )
+        .on_hover_text(tr.vcf_replay_start)
+        .clicked()
+    {
+        app.vcf_replay_to_start();
+    }
+    if ui
+        .add_enabled(
+            app.vcf_replay_len > 0,
+            egui::Button::new(egui::RichText::new("◀").size(btn_size)),
+        )
+        .on_hover_text(tr.vcf_replay_prev)
+        .clicked()
+    {
+        app.vcf_replay_prev();
+    }
+    ui.label(
+        egui::RichText::new(format!("{}/{}", app.vcf_replay_len, app.vcf_solution.len()))
+            .size(btn_size),
+    );
+    if ui
+        .add_enabled(
+            app.vcf_replay_len < app.vcf_solution.len(),
+            egui::Button::new(egui::RichText::new("▶").size(btn_size)),
+        )
+        .on_hover_text(tr.vcf_replay_next)
+        .clicked()
+    {
+        app.vcf_replay_next();
+    }
+    if ui
+        .add_enabled(
+            app.vcf_replay_len < app.vcf_solution.len(),
+            egui::Button::new(egui::RichText::new("⏭").size(btn_size)),
+        )
+        .on_hover_text(tr.vcf_replay_end)
+        .clicked()
+    {
+        app.vcf_replay_to_end();
+    }
+}
+
+/// Draws the normal game-record navigation controls (not the VCF/VCT replay).
+fn draw_history_navigation_controls(
+    ui: &mut egui::Ui,
+    app: &mut crate::RenjuApp,
+    tr: &lang::Tr,
+    btn_size: f32,
+) {
+    if ui
+        .button(egui::RichText::new(tr.undo_all).size(btn_size))
+        .on_hover_text(tr.undo_all_tooltip)
+        .clicked()
+    {
+        app.reset_to_root();
+    }
+
+    if ui
+        .button(egui::RichText::new(tr.undo_one).size(btn_size))
+        .on_hover_text(tr.undo_one_tooltip)
+        .clicked()
+    {
+        let before_len = app.board.history.len();
+        if app.board.custom_position || app.is_db_mode {
+            app.board.undo();
+        } else if let Some(nodes) = &app.lib_nodes {
+            if let Some(idx) = app.current_node_idx {
+                let node = &nodes[idx];
+                let p_idx = node.parent;
+                if p_idx != NO_NODE {
+                    if node.x() >= 0 && node.y() >= 0 {
+                        app.board.undo();
+                    }
+                    app.current_node_idx = Some(p_idx as usize);
+                }
+            }
+        } else {
+            app.board.undo();
+        }
+        if app.board.history.len() != before_len {
+            app.clear_vcf_solution();
+        }
+    }
+
+    if ui
+        .button(egui::RichText::new(tr.redo_one).size(btn_size))
+        .on_hover_text(tr.redo_one_tooltip)
+        .clicked()
+    {
+        app.step_forward();
+    }
+
+    if ui
+        .button(egui::RichText::new(tr.redo_all).size(btn_size))
+        .on_hover_text(tr.redo_all_tooltip)
+        .clicked()
+    {
+        while app.step_forward() {}
+    }
+}
+
 pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::Tr) {
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
         #[cfg(target_os = "android")]
@@ -26,7 +145,6 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
             };
 
             ui.spacing_mut().item_spacing.x = spacing;
-
             if ui
                 .button(egui::RichText::new(tr.new_game).size(btn_size))
                 .on_hover_text(tr.new_game_tooltip)
@@ -112,55 +230,8 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
 
             ui.separator();
 
-            if ui
-                .button(egui::RichText::new(tr.undo_all).size(btn_size))
-                .on_hover_text(tr.undo_all_tooltip)
-                .clicked()
-            {
-                app.reset_to_root();
-            }
-
-            if ui
-                .button(egui::RichText::new(tr.undo_one).size(btn_size))
-                .on_hover_text(tr.undo_one_tooltip)
-                .clicked()
-            {
-                let before_len = app.board.history.len();
-                if app.is_db_mode {
-                    app.board.undo();
-                } else if let Some(nodes) = &app.lib_nodes {
-                    if let Some(idx) = app.current_node_idx {
-                        let node = &nodes[idx];
-                        let p_idx = node.parent;
-                        if p_idx != NO_NODE {
-                            if node.x() >= 0 && node.y() >= 0 {
-                                app.board.undo();
-                            }
-                            app.current_node_idx = Some(p_idx as usize);
-                        }
-                    }
-                } else {
-                    app.board.undo();
-                }
-                if app.board.history.len() != before_len {
-                    app.clear_vcf_solution();
-                }
-            }
-
-            if ui
-                .button(egui::RichText::new(tr.redo_one).size(btn_size))
-                .on_hover_text(tr.redo_one_tooltip)
-                .clicked()
-            {
-                app.step_forward();
-            }
-
-            if ui
-                .button(egui::RichText::new(tr.redo_all).size(btn_size))
-                .on_hover_text(tr.redo_all_tooltip)
-                .clicked()
-            {
-                while app.step_forward() {}
+            if !(cfg!(target_arch = "wasm32") || cfg!(target_os = "android")) {
+                draw_history_navigation_controls(ui, app, tr, btn_size);
             }
 
             ui.separator();
@@ -221,7 +292,18 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
             }
         });
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
+        // Keep the mobile search and normal game-record controls on one
+        // fixed row. VCF/VCT replay is rendered below it to keep the toolbar
+        // height stable while the replay position changes.
+        let touch_target = cfg!(target_arch = "wasm32") || cfg!(target_os = "android");
+        let replay_btn_size = if cfg!(target_arch = "wasm32") {
+            app.settings.wasm_button_size * 0.8
+        } else if cfg!(target_os = "android") {
+            app.settings.android_button_size * 0.8
+        } else {
+            16.0
+        };
+        let mut draw_vcf_controls = |ui: &mut egui::Ui| {
             let (btn_size, spacing) = if cfg!(target_arch = "wasm32") {
                 (
                     app.settings.wasm_button_size * 0.8,
@@ -264,6 +346,9 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
             {
                 app.start_vcf_threat_search();
             }
+            if touch_target {
+                draw_history_navigation_controls(ui, app, tr, btn_size);
+            }
             #[cfg(target_os = "windows")]
             if ui
                 .button(egui::RichText::new("Log").size(btn_size).strong())
@@ -292,57 +377,25 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
                 ui.label(egui::RichText::new(&app.vcf_status).size(btn_size));
             }
 
-            if !app.vcf_solving && !app.vcf_solution.is_empty() {
-                if ui
-                    .add_enabled(
-                        app.vcf_replay_len > 0,
-                        egui::Button::new(egui::RichText::new("⏮").size(btn_size)),
-                    )
-                    .on_hover_text(tr.vcf_replay_start)
-                    .clicked()
-                {
-                    app.vcf_replay_to_start();
-                }
-                if ui
-                    .add_enabled(
-                        app.vcf_replay_len > 0,
-                        egui::Button::new(egui::RichText::new("◀").size(btn_size)),
-                    )
-                    .on_hover_text(tr.vcf_replay_prev)
-                    .clicked()
-                {
-                    app.vcf_replay_prev();
-                }
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}/{}",
-                        app.vcf_replay_len,
-                        app.vcf_solution.len()
-                    ))
-                    .size(btn_size),
-                );
-                if ui
-                    .add_enabled(
-                        app.vcf_replay_len < app.vcf_solution.len(),
-                        egui::Button::new(egui::RichText::new("▶").size(btn_size)),
-                    )
-                    .on_hover_text(tr.vcf_replay_next)
-                    .clicked()
-                {
-                    app.vcf_replay_next();
-                }
-                if ui
-                    .add_enabled(
-                        app.vcf_replay_len < app.vcf_solution.len(),
-                        egui::Button::new(egui::RichText::new("⏭").size(btn_size)),
-                    )
-                    .on_hover_text(tr.vcf_replay_end)
-                    .clicked()
-                {
-                    app.vcf_replay_to_end();
-                }
+            if !touch_target {
+                draw_vcf_replay_controls(ui, app, tr, btn_size);
             }
+        };
+        ui.horizontal(|ui| {
+            draw_vcf_controls(ui);
         });
+        if touch_target && !app.vcf_solving && !app.vcf_solution.is_empty() {
+            ui.add_space(2.0);
+            let replay_height = replay_btn_size + ui.spacing().button_padding.y * 2.0 + 4.0;
+            // Reserve a full-width, fixed-height row. This must not share the
+            // action row: otherwise egui's available-width calculation can
+            // occasionally keep the replay controls on that row on touch UIs.
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), replay_height),
+                egui::Layout::left_to_right(egui::Align::Min),
+                |ui| draw_vcf_replay_controls(ui, app, tr, replay_btn_size),
+            );
+        }
         ui.add_space(4.0);
     });
 }

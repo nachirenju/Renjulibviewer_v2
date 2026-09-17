@@ -1,7 +1,7 @@
 use super::game::*;
 use crate::board::*;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mate {
     pub end: End,
     pub path: Vec<Point>,

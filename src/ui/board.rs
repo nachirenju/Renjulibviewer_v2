@@ -7,9 +7,15 @@ use crate::vcf::solver::{BLACK, WHITE};
 use eframe::egui;
 
 pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut egui::Ui) {
+    let was_free = app.settings.free_placement;
     if app.settings.show_settings_window(ctx) {
         crate::setup_custom_fonts(ctx, &app.settings.font_path);
     }
+    if !was_free && app.settings.free_placement {
+        app.board.begin_free_placement();
+        app.clear_vcf_solution();
+    }
+    crate::ui::dialogs::draw_start_player_dialog(app, ctx);
 
     crate::ui::dialogs::draw_about_dialog(app, ctx);
     crate::ui::dialogs::draw_gif_setup_dialog(app, ctx);
@@ -123,7 +129,7 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
         is_gif_capturing,
     );
 
-    if app.settings.show_branches && !is_gif_capturing {
+    let branch_points = if app.settings.show_branches && !is_gif_capturing {
         crate::ui::board::draw_branches(
             app,
             ctx,
@@ -132,7 +138,13 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
             cell_size,
             current_history,
             target_idx,
-        );
+        )
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    if app.settings.show_quintet_potentials && !is_gif_capturing {
+        crate::ui::board::draw_quintet_potentials(app, &painter, rect, cell_size, &branch_points);
     }
 
     if !is_gif_capturing {
@@ -392,6 +404,30 @@ pub fn handle_board_input(
     is_selecting_region: bool,
     panel_right_clicked: bool,
 ) {
+    if app.settings.choose_start_player {
+        return;
+    }
+    if app.settings.free_placement {
+        if !is_selecting_region && !is_gif_capturing {
+            let player = if response.secondary_clicked() {
+                Some(Player::White)
+            } else if response.clicked_by(egui::PointerButton::Primary) {
+                Some(Player::Black)
+            } else {
+                None
+            };
+            if let (Some(player), Some(pos)) = (player, response.interact_pointer_pos()) {
+                let gx = ((pos.x - (rect.left() + cell_size)) / cell_size + 0.5).floor() as i32;
+                let gy = ((pos.y - (rect.top() + cell_size)) / cell_size + 0.5).floor() as i32;
+                if (0..SIZE as i32).contains(&gx) && (0..SIZE as i32).contains(&gy) {
+                    app.board
+                        .toggle_setup_stone(gx as usize, gy as usize, player);
+                    app.clear_vcf_solution();
+                }
+            }
+        }
+        return;
+    }
     if !is_selecting_region
         && !is_gif_capturing
         && (response.clicked()
@@ -431,7 +467,7 @@ pub fn handle_board_input(
     let right_clicked = response.secondary_clicked() || panel_right_clicked;
     if right_clicked && !is_gif_capturing {
         let before_len = app.board.history.len();
-        if app.is_db_mode {
+        if app.board.custom_position || app.is_db_mode {
             app.board.undo();
         } else if let Some(idx) = app.current_node_idx {
             if let Some(nodes) = &app.lib_nodes {
@@ -533,15 +569,7 @@ pub fn draw_stones(
     is_gif_capturing: bool,
 ) {
     let font_id = egui::FontId::proportional(cell_size * 0.4);
-    let mut temp_grid = [None; SIZE * SIZE];
-    let mut temp_player = Player::Black;
-    for &m in current_history {
-        temp_grid[m] = Some(temp_player);
-        temp_player = match temp_player {
-            Player::Black => Player::White,
-            Player::White => Player::Black,
-        };
-    }
+    let temp_grid = app.board.grid_at_history(current_history);
 
     for y in 0..SIZE {
         for x in 0..SIZE {
@@ -608,19 +636,19 @@ pub fn draw_stones(
                     if let Some(turn) = current_history.iter().position(|&idx| idx == y * SIZE + x)
                     {
                         let move_number = turn + 1;
-                        let show = if is_gif_capturing {
-                            move_number >= app.gif_settings.show_number_start_move
+                        let display_num = if is_gif_capturing {
+                            move_number
+                                .checked_sub(app.gif_settings.show_number_start_move)
+                                .map(|offset| {
+                                    app.gif_settings
+                                        .show_number_start_value
+                                        .saturating_add(offset)
+                                })
                         } else {
-                            true
+                            app.settings.stone_number(move_number)
                         };
 
-                        if show {
-                            let display_num = if is_gif_capturing {
-                                app.gif_settings.show_number_start_value
-                                    + (move_number - app.gif_settings.show_number_start_move)
-                            } else {
-                                move_number
-                            };
+                        if let Some(display_num) = display_num {
                             let t_color = if move_number == current_history.len() {
                                 egui::Color32::from_rgb(
                                     (app.settings.last_move_color[0] * 255.0) as u8,
@@ -647,6 +675,70 @@ pub fn draw_stones(
     }
 }
 
+/// Draw Quintet's attacker potential for the current side to move.
+///
+/// VCT maintains its field from directional potentials with a minimum of two,
+/// then admits points whose summed value is at least three. Rebuilding that
+/// same field here keeps this diagnostic overlay identical to candidate
+/// generation without changing search state.
+pub fn draw_quintet_potentials(
+    app: &crate::RenjuApp,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    cell_size: f32,
+    blocked_points: &std::collections::HashSet<(usize, usize)>,
+) {
+    use quintet::analysis::field::PotentialField;
+    use quintet::board::{Board as QuintetBoard, Player as QuintetPlayer, Point, Points};
+
+    let mut blacks = Vec::new();
+    let mut whites = Vec::new();
+    for (idx, stone) in app.board.grid.iter().enumerate() {
+        let point = Point((idx % SIZE) as u8, (idx / SIZE) as u8);
+        match stone {
+            Some(Player::Black) => blacks.push(point),
+            Some(Player::White) => whites.push(point),
+            None => {}
+        }
+    }
+
+    let board = QuintetBoard::from_stones(&Points(blacks), &Points(whites));
+    let attacker = match app.board.next_player {
+        Player::Black => QuintetPlayer::Black,
+        Player::White => QuintetPlayer::White,
+    };
+    let field = PotentialField::init(attacker, 2, &board);
+    let font_id = egui::FontId::proportional(cell_size * 0.30);
+    let radius = cell_size * 0.24;
+    let fill = egui::Color32::from_rgba_unmultiplied(35, 105, 190, 220);
+
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            if app.board.grid[y * SIZE + x].is_some() || blocked_points.contains(&(x, y)) {
+                continue;
+            }
+            let value = field.get(Point(x as u8, y as u8));
+            if value < 3 {
+                continue;
+            }
+
+            let center = egui::pos2(
+                rect.left() + cell_size * (x as f32 + 1.0),
+                rect.top() + cell_size * (y as f32 + 1.0),
+            );
+            painter.circle_filled(center, radius, fill);
+            painter.circle_stroke(center, radius, (1.0, egui::Color32::WHITE));
+            painter.text(
+                center,
+                egui::Align2::CENTER_CENTER,
+                value.to_string(),
+                font_id.clone(),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+}
+
 pub fn draw_branches(
     app: &crate::RenjuApp,
     ctx: &egui::Context,
@@ -655,7 +747,11 @@ pub fn draw_branches(
     cell_size: f32,
     current_history: &[usize],
     target_idx: Option<usize>,
-) {
+) -> std::collections::HashSet<(usize, usize)> {
+    let mut visible_branch_points = std::collections::HashSet::new();
+    if app.board.custom_position {
+        return visible_branch_points;
+    }
     if let Some(nodes) = &app.lib_nodes {
         let mut pb = HashBoard::new();
         for &m in current_history {
@@ -816,6 +912,7 @@ pub fn draw_branches(
                             count,
                             text,
                         });
+                        visible_branch_points.insert((x, y));
                     }
                 }
             }
@@ -982,4 +1079,5 @@ pub fn draw_branches(
             }
         }
     }
+    visible_branch_points
 }

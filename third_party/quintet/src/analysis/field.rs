@@ -24,21 +24,51 @@ impl Potential {
         // TODO: faster computation
         self.v + self.h + self.a + self.d
     }
+
+    fn direction_count(&self) -> u8 {
+        [self.v, self.h, self.a, self.d]
+            .iter()
+            .filter(|&&value| value > 0)
+            .count() as u8
+    }
 }
 
 type Potentials = [[Potential; RANGE as usize]; RANGE as usize];
+type PotentialBuckets = [[u16; RANGE as usize]; (u8::MAX as usize) + 1];
+type DirectionBuckets = [[u16; RANGE as usize]; 5];
+type ScoreDirectionCounts = [[u16; 5]; (u8::MAX as usize) + 1];
+
+const BOARD_BITS: u16 = (1u16 << RANGE) - 1;
 
 #[derive(Clone)]
 pub struct PotentialField {
     potentials: Potentials,
+    buckets: PotentialBuckets,
+    direction_buckets: DirectionBuckets,
+    bucket_counts: [u16; (u8::MAX as usize) + 1],
+    score_direction_counts: ScoreDirectionCounts,
+    max_score: u8,
     player: Player,
     min: u8,
 }
 
 impl PotentialField {
     pub fn new(player: Player, min: u8) -> Self {
+        let mut buckets = [[0u16; RANGE as usize]; (u8::MAX as usize) + 1];
+        buckets[0].fill(BOARD_BITS);
+        let mut direction_buckets = [[0u16; RANGE as usize]; 5];
+        direction_buckets[0].fill(BOARD_BITS);
+        let mut bucket_counts = [0u16; (u8::MAX as usize) + 1];
+        bucket_counts[0] = (RANGE as u16) * (RANGE as u16);
+        let mut score_direction_counts = [[0u16; 5]; (u8::MAX as usize) + 1];
+        score_direction_counts[0][0] = (RANGE as u16) * (RANGE as u16);
         Self {
             potentials: Potentials::default(),
+            buckets,
+            direction_buckets,
+            bucket_counts,
+            score_direction_counts,
+            max_score: 0,
             player: player,
             min: min,
         }
@@ -65,6 +95,10 @@ impl PotentialField {
         self.sum(p)
     }
 
+    pub fn direction_count(&self, p: Point) -> u8 {
+        self.potentials[p.0 as usize][p.1 as usize].direction_count()
+    }
+
     pub fn collect(&self, min: u8) -> Vec<(Point, u8)> {
         (0..RANGE)
             .flat_map(|x| {
@@ -75,6 +109,57 @@ impl PotentialField {
             })
             .filter(|&(_, o)| o >= min)
             .collect()
+    }
+
+    /// Collects matching points in the same order as a stable descending
+    /// potential sort with a direction-count tie-break, without scanning all
+    /// board cells or sorting the result.
+    pub fn collect_sorted(&self, min: u8) -> Vec<(Point, u8)> {
+        let capacity = self.count_at_least(min);
+        let mut result = Vec::with_capacity(capacity);
+        result.extend(self.iter_sorted(min));
+        result
+    }
+
+    /// Iterates matching points directly from the score buckets. The order is
+    /// score descending, connected-direction count descending, then x/y
+    /// ascending for exact ties.
+    pub fn iter_sorted(&self, min: u8) -> impl Iterator<Item = (Point, u8)> + '_ {
+        let max_score = self.max_score;
+        (min..=max_score)
+            .rev()
+            .filter(move |&score| self.bucket_counts[score as usize] > 0)
+            .flat_map(move |score| {
+                (0..=4u8)
+                    .rev()
+                    .filter(move |&directions| {
+                        self.score_direction_counts[score as usize][directions as usize] > 0
+                    })
+                    .flat_map(move |directions| {
+                        (0..RANGE).flat_map(move |x| {
+                            let mut ys = self.buckets[score as usize][x as usize]
+                                & self.direction_buckets[directions as usize][x as usize];
+                            std::iter::from_fn(move || {
+                                if ys == 0 {
+                                    return None;
+                                }
+                                let y = ys.trailing_zeros() as u8;
+                                ys &= ys - 1;
+                                Some((Point(x, y), score))
+                            })
+                        })
+                    })
+            })
+    }
+
+    pub fn count_at_least(&self, min: u8) -> usize {
+        if min > self.max_score {
+            return 0;
+        }
+        self.bucket_counts[min as usize..=self.max_score as usize]
+            .iter()
+            .map(|&count| count as usize)
+            .sum()
     }
 
     #[allow(dead_code)]
@@ -127,13 +212,96 @@ impl PotentialField {
 
     fn set(&mut self, i: Index, o: u8) {
         let p = i.to_point();
-        self.potentials[p.0 as usize][p.1 as usize].set(i.d, o)
+        let old_score = self.sum(p);
+        let old_directions = self.direction_count(p);
+        self.potentials[p.0 as usize][p.1 as usize].set(i.d, o);
+        let new_score = self.sum(p);
+        let new_directions = self.direction_count(p);
+        if old_score == new_score && old_directions == new_directions {
+            return;
+        }
+
+        let bit = 1u16 << p.1;
+        self.score_direction_counts[old_score as usize][old_directions as usize] -= 1;
+        self.score_direction_counts[new_score as usize][new_directions as usize] += 1;
+        if old_score != new_score {
+            self.buckets[old_score as usize][p.0 as usize] &= !bit;
+            self.buckets[new_score as usize][p.0 as usize] |= bit;
+            self.bucket_counts[old_score as usize] -= 1;
+            self.bucket_counts[new_score as usize] += 1;
+            if new_score > self.max_score {
+                self.max_score = new_score;
+            } else if old_score == self.max_score && self.bucket_counts[old_score as usize] == 0 {
+                while self.max_score > 0 && self.bucket_counts[self.max_score as usize] == 0 {
+                    self.max_score -= 1;
+                }
+            }
+        }
+        if old_directions != new_directions {
+            self.direction_buckets[old_directions as usize][p.0 as usize] &= !bit;
+            self.direction_buckets[new_directions as usize][p.0 as usize] |= bit;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_sorted_matches_scan(field: &PotentialField, min: u8) {
+        let mut expected = field.collect(min);
+        expected.sort_by(|&a, &b| {
+            b.1.cmp(&a.1)
+                .then_with(|| field.direction_count(b.0).cmp(&field.direction_count(a.0)))
+        });
+        assert_eq!(field.collect_sorted(min), expected);
+    }
+
+    #[test]
+    fn equal_potential_prefers_more_connected_directions() {
+        let mut field = PotentialField::new(Black, 2);
+        let single_direction = Point(3, 3);
+        let connected = Point(9, 9);
+        field.set(single_direction.to_index(Horizontal), 4);
+        field.set(connected.to_index(Horizontal), 2);
+        field.set(connected.to_index(Vertical), 2);
+
+        assert_eq!(field.get(single_direction), field.get(connected));
+        assert_eq!(field.direction_count(single_direction), 1);
+        assert_eq!(field.direction_count(connected), 2);
+        assert_eq!(field.collect_sorted(3)[0].0, connected);
+    }
+
+    #[test]
+    fn sorted_buckets_match_full_scan_after_updates_and_undo() {
+        let mut board = Board::new();
+        let mut field = PotentialField::init(Black, 2, &board);
+        assert_sorted_matches_scan(&field, 2);
+        assert_sorted_matches_scan(&field, 3);
+
+        let moves = [
+            (Black, Point(7, 7)),
+            (White, Point(7, 8)),
+            (Black, Point(8, 7)),
+            (White, Point(6, 8)),
+            (Black, Point(9, 7)),
+            (White, Point(8, 8)),
+            (Black, Point(6, 7)),
+        ];
+        for &(player, point) in &moves {
+            board.put_mut(player, point);
+            field.update_along(point, &board);
+            assert_sorted_matches_scan(&field, 2);
+            assert_sorted_matches_scan(&field, 3);
+        }
+
+        for &(_, point) in moves.iter().rev() {
+            board.remove_mut(point);
+            field.update_along(point, &board);
+            assert_sorted_matches_scan(&field, 2);
+            assert_sorted_matches_scan(&field, 3);
+        }
+    }
 
     #[test]
     fn test_overlay() -> Result<(), String> {

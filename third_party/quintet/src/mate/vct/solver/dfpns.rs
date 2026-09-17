@@ -1,7 +1,6 @@
-use crate::board::Point;
 use crate::mate::vcf;
-use crate::mate::vct::generator::Generator;
-use crate::mate::vct::helper::VCFHelper;
+use crate::mate::vct::generator::{CandidateResult, Generator};
+use crate::mate::vct::helper::{VCFHelper, VCFProbeKind};
 use crate::mate::vct::observer::SearchObserver;
 use crate::mate::vct::proof::*;
 use crate::mate::vct::resolver::Resolver;
@@ -10,9 +9,11 @@ use crate::mate::vct::selector::*;
 use crate::mate::vct::solver::VCTSolver;
 use crate::mate::vct::traverser::*;
 use crate::mate::vct::{
-    VCTSearchControl, VCTSearchProgress, VCTSearchResult, VCTSearchStop, VCTState,
+    VCTSearchControl, VCTSearchProgress, VCTSearchResult, VCTSearchStats, VCTSearchStop, VCTState,
 };
+use crate::mate::Mate;
 use lru::LruCache;
+use rustc_hash::FxHashMap;
 
 pub struct DFPNSVCTSolver {
     attacker_table: Table,
@@ -21,8 +22,10 @@ pub struct DFPNSVCTSolver {
     defender_vcf_depth: u8,
     attacker_vcf_solver: vcf::IDDFSSolver,
     defender_vcf_solver: vcf::IDDFSSolver,
-    attacks_cache: LruCache<u64, Result<Vec<Point>, Node>>,
-    defences_cache: LruCache<u64, Result<Vec<Point>, Node>>,
+    attacks_cache: LruCache<u64, CandidateResult>,
+    defences_cache: LruCache<u64, CandidateResult>,
+    positive_vcf_cache: FxHashMap<(VCFProbeKind, u64), Mate>,
+    stats: VCTSearchStats,
     control: Option<VCTSearchControl>,
     stopped: Option<VCTSearchStop>,
     visited_nodes: u64,
@@ -39,6 +42,8 @@ impl DFPNSVCTSolver {
             defender_vcf_solver: vcf::IDDFSSolver::init([1].to_vec()),
             attacks_cache: LruCache::new(1000),
             defences_cache: LruCache::new(1000),
+            positive_vcf_cache: FxHashMap::default(),
+            stats: VCTSearchStats::default(),
             control: None,
             stopped: None,
             visited_nodes: 0,
@@ -58,15 +63,30 @@ impl DFPNSVCTSolver {
     pub fn solve_with_control(&mut self, state: &mut VCTState) -> VCTSearchResult {
         let result = VCTSolver::solve(self, state);
         self.poll_stop();
+        self.capture_selection_stats();
         if let Some(stopped) = self.stopped {
-            return VCTSearchResult::Stopped(stopped);
+            return VCTSearchResult::Stopped(stopped, self.stats);
         }
         if let Some(mate) = result.as_ref() {
             if let Some(control) = self.control.as_mut() {
                 control.report_final(mate.path().clone(), self.visited_nodes);
             }
         }
-        VCTSearchResult::Completed(result)
+        VCTSearchResult::Completed(result, self.stats)
+    }
+
+    fn capture_selection_stats(&mut self) {
+        let attack = self.attacker_table.selection_stats();
+        self.stats.attack_selector_full_scans = attack.full_scans;
+        self.stats.attack_selector_cache_hits = attack.cache_hits;
+        self.stats.attack_selector_incremental_updates = attack.incremental_updates;
+        self.stats.attack_selector_child_lookups = attack.child_lookups;
+
+        let defence = self.defender_table.selection_stats();
+        self.stats.defence_selector_full_scans = defence.full_scans;
+        self.stats.defence_selector_cache_hits = defence.cache_hits;
+        self.stats.defence_selector_incremental_updates = defence.incremental_updates;
+        self.stats.defence_selector_child_lookups = defence.child_lookups;
     }
 }
 
@@ -75,12 +95,16 @@ impl VCTSolver for DFPNSVCTSolver {}
 impl Searcher for DFPNSVCTSolver {}
 
 impl Generator for DFPNSVCTSolver {
-    fn attacks_cache(&mut self) -> &mut LruCache<u64, Result<Vec<Point>, Node>> {
+    fn attacks_cache(&mut self) -> &mut LruCache<u64, CandidateResult> {
         &mut self.attacks_cache
     }
 
-    fn defences_cache(&mut self) -> &mut LruCache<u64, Result<Vec<Point>, Node>> {
+    fn defences_cache(&mut self) -> &mut LruCache<u64, CandidateResult> {
         &mut self.defences_cache
+    }
+
+    fn record_candidate_counts(&mut self, attacking: bool, before: usize, after: usize) {
+        self.stats.record_candidates(attacking, before, after);
     }
 }
 
@@ -103,6 +127,19 @@ impl VCFHelper for DFPNSVCTSolver {
 
     fn poll_interrupt(&mut self) -> bool {
         SearchObserver::poll_stop(self)
+    }
+
+    fn lookup_positive_vcf(&mut self, kind: VCFProbeKind, key: u64) -> Option<Mate> {
+        let result = self.positive_vcf_cache.get(&(kind, key)).cloned();
+        if result.is_some() {
+            self.stats.positive_vcf_cache_hits =
+                self.stats.positive_vcf_cache_hits.saturating_add(1);
+        }
+        result
+    }
+
+    fn store_positive_vcf(&mut self, kind: VCFProbeKind, key: u64, mate: Mate) {
+        self.positive_vcf_cache.insert((kind, key), mate);
     }
 }
 

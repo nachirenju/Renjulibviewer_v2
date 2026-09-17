@@ -10,7 +10,9 @@ mod solver;
 mod state;
 mod traverser;
 
-pub use control::{VCTSearchControl, VCTSearchProgress, VCTSearchResult, VCTSearchStop};
+pub use control::{
+    VCTSearchControl, VCTSearchProgress, VCTSearchResult, VCTSearchStats, VCTSearchStop,
+};
 pub use solver::DFPNSVCTSolver;
 pub use solver::DFSVCTSolver;
 pub use solver::PNSVCTSolver;

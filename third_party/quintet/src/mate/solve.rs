@@ -112,7 +112,7 @@ where
     P: FnMut(VCTSearchProgress) + Send + 'static,
 {
     if let Err(result) = validate(board, attacker) {
-        return VCTSearchResult::Completed(result);
+        return VCTSearchResult::Completed(result, VCTSearchStats::default());
     }
     let state = &mut VCTState::init(board, attacker, limit);
     let control = VCTSearchControl::new(should_stop, on_progress);
@@ -562,7 +562,9 @@ mod tests {
         let result = solve(VCTDFS, 4, &board, White, 1);
         assert!(result.is_none());
 
-        let solution = "J4,K3,I4,I3,F8,G7,E6,G9,G6";
+        // Priority-weighted unknown leaves may choose the same shorter proof
+        // already verified by DFS above.
+        let solution = "J4,G7,I4,I3,E6,G4,G6";
         let result = solve(VCTDFPNS, 5, &board, White, 1);
         assert_eq!(path_string(result), solution);
 

@@ -20,7 +20,7 @@ path = "src/main.rs"
 
 [dependencies]
 # --- 全プラットフォーム共通の依存関係 ---
-eframe = { version = "0.30", default-features = false, features = ["android-native-activity", "default_fonts", "glow", "persistence"] }
+eframe = { version = "0.30", default-features = false, features = ["android-game-activity", "default_fonts", "glow", "persistence"] }
 encoding_rs = "0.8"
 lz4_flex = "0.11"
 byteorder = "1.5"
@@ -46,7 +46,7 @@ web-time = "1.1"
 pollster = "0.3"
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6", features = ["native-activity"] }
+android-activity = { version = "0.6", features = ["game-activity"] }
 jni = "0.22"
 rand = "0.8"
 web-time = "1.1"
@@ -71,6 +71,14 @@ winreg = "0.52"
 # --- ビルドスクリプト用（Windowsのアイコン設定用） ---
 [build-dependencies]
 winres = "0.1"
+
+# winit 0.30.13 does not stop its Android event loop for MainEvent::Destroy.
+# Android's Activity teardown waits for that loop during onDestroy, so the old process can
+# deadlock and leave the next launch on Android's splash screen. Keep this
+# narrow patch local until the upstream Android lifecycle issue is resolved.
+[patch.crates-io]
+winit = { path = "third_party/winit" }
+eframe = { path = "third_party/eframe" }
 
 [profile.release]
 opt-level = 3        

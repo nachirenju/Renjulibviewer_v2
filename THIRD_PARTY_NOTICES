@@ -24,3 +24,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+winit
+=====
+
+The Android build uses a locally patched copy of winit 0.30.13 so its event
+loop exits when NativeActivity is destroyed. winit is licensed under the
+Apache License 2.0. The full license text is included at
+third_party/winit/LICENSE.

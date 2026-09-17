@@ -1,3 +1,4 @@
+use super::generator::Candidate;
 use super::generator::Generator;
 use super::observer::SearchObserver;
 use super::state::VCTState;
@@ -26,7 +27,7 @@ pub trait Searcher: Generator + Traverser + SearchObserver {
             return match event {
                 Defeated(_) => Node::zero_dn(state.limit),
                 Forced(next_move) => {
-                    let attacks = &[next_move];
+                    let attacks = &[Candidate::new(state, next_move)];
                     self.traverse_attacks(state, attacks, threshold, Self::search_defences)
                         .current
                 }
@@ -42,7 +43,7 @@ pub trait Searcher: Generator + Traverser + SearchObserver {
         }
 
         let attacks = either_attacks.unwrap();
-        self.traverse_attacks(state, &attacks, threshold, Self::search_defences)
+        self.traverse_attacks(state, attacks.as_ref(), threshold, Self::search_defences)
             .current
     }
 
@@ -57,7 +58,7 @@ pub trait Searcher: Generator + Traverser + SearchObserver {
                     if state.limit <= 1 {
                         Node::zero_dn(state.limit)
                     } else {
-                        let defences = &[next_move];
+                        let defences = &[Candidate::new(state, next_move)];
                         self.traverse_defences(state, defences, threshold, Self::search_attacks)
                             .current
                     }
@@ -78,7 +79,7 @@ pub trait Searcher: Generator + Traverser + SearchObserver {
         }
 
         let defences = either_defences.unwrap();
-        self.traverse_defences(state, &defences, threshold, Self::search_attacks)
+        self.traverse_defences(state, defences.as_ref(), threshold, Self::search_attacks)
             .current
     }
 }

@@ -1,4 +1,6 @@
 use crate::board::Point;
+use crate::mate::state::State;
+use crate::mate::vct::generator::Candidate;
 use crate::mate::vct::proof::*;
 use crate::mate::vct::state::VCTState;
 
@@ -21,66 +23,60 @@ impl Selection {
 }
 
 pub trait Selector: ProofTree {
-    fn select_attack(&mut self, state: &mut VCTState, attacks: &[Point]) -> Selection {
+    fn select_attack(&mut self, state: &mut VCTState, attacks: &[Candidate]) -> Selection {
         let limit = state.limit;
-        let mut best: Option<Point> = Some(attacks[0]);
-        let mut current = Node::zero_dn(limit);
-        let mut next1 = Node::zero_dn(limit);
-        let mut next2 = Node::zero_dn(limit);
-        let init = Node::unit_dn(attacks.len() as u32, limit); // trick
-        for &attack in attacks {
-            let maybe_child = self.attacker_table().lookup_next(state, Some(attack));
-            let child = maybe_child.unwrap_or(init);
-            current = current.min_pn_sum_dn(child);
-            if child.pn < next1.pn {
-                best.replace(attack);
-                next2 = next1;
-                next1 = child;
-            } else if child.pn < next2.pn {
-                next2 = child;
-            }
-            if current.pn == 0 {
-                current.dn = INF;
-                break;
-            }
-        }
+        let parent_key = state.zobrist_hash();
+        let max_priority = attacks
+            .first()
+            .map(|candidate| candidate.priority)
+            .unwrap_or(0);
+        let cached = self.attacker_table().select_cached(
+            parent_key,
+            attacks.len(),
+            SelectionKind::Attack,
+            limit,
+            max_priority,
+            || {
+                attacks
+                    .iter()
+                    .map(|candidate| (candidate.child_hash, candidate.priority))
+            },
+        );
+        let best = attacks[cached.best_index].point;
         Selection {
-            best: best,
-            current: current,
-            next1: next1,
-            next2: next2,
+            best: Some(best),
+            current: cached.current,
+            next1: cached.next1,
+            next2: cached.next2,
         }
     }
 
-    fn select_defence(&mut self, state: &mut VCTState, defences: &[Point]) -> Selection {
+    fn select_defence(&mut self, state: &mut VCTState, defences: &[Candidate]) -> Selection {
         let limit = state.limit;
-        let mut best: Option<Point> = Some(defences[0]);
         let child_limit = limit.saturating_sub(1);
-        let mut current = Node::zero_pn(child_limit);
-        let mut next1 = Node::zero_pn(child_limit);
-        let mut next2 = Node::zero_pn(child_limit);
-        let init = Node::unit_pn(defences.len() as u32, child_limit); // trick
-        for &defence in defences {
-            let maybe_child = self.defender_table().lookup_next(state, Some(defence));
-            let child = maybe_child.unwrap_or(init);
-            current = current.min_dn_sum_pn(child);
-            if child.dn < next1.dn {
-                best.replace(defence);
-                next2 = next1;
-                next1 = child;
-            } else if child.dn < next2.dn {
-                next2 = child;
-            }
-            if current.dn == 0 {
-                current.pn = INF;
-                break;
-            }
-        }
+        let parent_key = state.zobrist_hash();
+        let max_priority = defences
+            .first()
+            .map(|candidate| candidate.priority)
+            .unwrap_or(0);
+        let cached = self.defender_table().select_cached(
+            parent_key,
+            defences.len(),
+            SelectionKind::Defence,
+            child_limit,
+            max_priority,
+            || {
+                defences
+                    .iter()
+                    .map(|candidate| (candidate.child_hash, candidate.priority))
+            },
+        );
+        let best = defences[cached.best_index].point;
         Selection {
-            best: best,
-            current: current,
-            next1: next1,
-            next2: next2,
+            best: Some(best),
+            current: cached.current,
+            next1: cached.next1,
+            next2: cached.next2,
         }
     }
 }

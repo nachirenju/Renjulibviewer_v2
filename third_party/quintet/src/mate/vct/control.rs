@@ -8,10 +8,51 @@ pub enum VCTSearchStop {
     TimedOut,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VCTSearchStats {
+    pub attack_candidate_lists: u64,
+    pub attack_candidates_before_dedup: u64,
+    pub attack_candidates_after_dedup: u64,
+    pub defence_candidate_lists: u64,
+    pub defence_candidates_before_dedup: u64,
+    pub defence_candidates_after_dedup: u64,
+    pub positive_vcf_cache_hits: u64,
+    pub attack_selector_full_scans: u64,
+    pub attack_selector_cache_hits: u64,
+    pub attack_selector_incremental_updates: u64,
+    pub attack_selector_child_lookups: u64,
+    pub defence_selector_full_scans: u64,
+    pub defence_selector_cache_hits: u64,
+    pub defence_selector_incremental_updates: u64,
+    pub defence_selector_child_lookups: u64,
+}
+
+impl VCTSearchStats {
+    pub fn record_candidates(&mut self, attacking: bool, before: usize, after: usize) {
+        if attacking {
+            self.attack_candidate_lists = self.attack_candidate_lists.saturating_add(1);
+            self.attack_candidates_before_dedup = self
+                .attack_candidates_before_dedup
+                .saturating_add(before as u64);
+            self.attack_candidates_after_dedup = self
+                .attack_candidates_after_dedup
+                .saturating_add(after as u64);
+        } else {
+            self.defence_candidate_lists = self.defence_candidate_lists.saturating_add(1);
+            self.defence_candidates_before_dedup = self
+                .defence_candidates_before_dedup
+                .saturating_add(before as u64);
+            self.defence_candidates_after_dedup = self
+                .defence_candidates_after_dedup
+                .saturating_add(after as u64);
+        }
+    }
+}
+
 /// A throttled snapshot of the current most-proving descent.
 ///
 /// `path` is relative to the position passed to the solver.  It is an
-/// in-progress line, not a proof until `VCTSearchResult::Completed(Some(_))`
+/// in-progress line, not a proof until `VCTSearchResult::Completed(Some(_), _)`
 /// has been returned.
 #[derive(Clone, Debug)]
 pub struct VCTSearchProgress {
@@ -26,8 +67,8 @@ pub struct VCTSearchProgress {
 /// interruption never reuses an in-progress node as a proof/disproof.
 #[derive(Debug)]
 pub enum VCTSearchResult {
-    Completed(Option<Mate>),
-    Stopped(VCTSearchStop),
+    Completed(Option<Mate>, VCTSearchStats),
+    Stopped(VCTSearchStop, VCTSearchStats),
 }
 
 /// Callbacks used by the controlled DF-PNS entry point.

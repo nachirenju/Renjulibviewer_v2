@@ -64,6 +64,7 @@ mod android_file {
     use jni::{
         JavaVM, jni_sig, jni_str,
         objects::{JObject, JString, JValue},
+        refs::Global,
     };
     use std::{
         ffi::c_void,
@@ -81,20 +82,30 @@ mod android_file {
     }
 
     pub fn init(app: &AndroidApp) {
-        ACTIVITY.store(app.activity_as_ptr(), Ordering::SeqCst);
+        ACTIVITY.store(app.activity_as_ptr(), Ordering::Release);
+    }
+
+    pub fn clear() {
+        ACTIVITY.store(std::ptr::null_mut(), Ordering::Release);
     }
 
     fn with_activity<T>(
-        f: impl for<'local> FnOnce(&mut jni::Env<'local>, JObject<'local>) -> jni::errors::Result<T>,
+        f: impl for<'local> FnOnce(&mut jni::Env<'local>, &JObject<'local>) -> jni::errors::Result<T>,
     ) -> Result<T, String> {
         let vm = JavaVM::singleton().map_err(|err| format!("{err:?}"))?;
-        let activity_raw = ACTIVITY.load(Ordering::SeqCst) as jni::sys::jobject;
+        let activity_raw = ACTIVITY.load(Ordering::Acquire) as jni::sys::jobject;
         if activity_raw.is_null() {
             return Err("Android activity is not initialized".to_string());
         }
         vm.attach_current_thread(|env| {
-            let activity = unsafe { JObject::from_raw(env, activity_raw) };
-            f(env, activity)
+            // AndroidApp owns this global JNI reference. Borrow it without
+            // constructing an owned local/global wrapper, as required by
+            // android-activity's activity_as_ptr contract.
+            let activity = {
+                let activity_global = unsafe { env.as_cast_raw::<Global<JObject>>(&activity_raw)? };
+                env.new_local_ref(activity_global.as_ref())?
+            };
+            f(env, &activity)
         })
         .map_err(|err| format!("{err:?}"))
     }
@@ -104,7 +115,7 @@ mod android_file {
             let value = match method {
                 TakeStringMethod::OpenedFileName => env
                     .call_method(
-                        &activity,
+                        activity,
                         jni_str!("takeOpenedFileName"),
                         jni_sig!(() -> JString),
                         &[],
@@ -112,8 +123,24 @@ mod android_file {
                     .l()?,
                 TakeStringMethod::FileError => env
                     .call_method(
-                        &activity,
+                        activity,
                         jni_str!("takeFileError"),
+                        jni_sig!(() -> JString),
+                        &[],
+                    )?
+                    .l()?,
+                TakeStringMethod::FontPath => env
+                    .call_method(
+                        activity,
+                        jni_str!("takeFontPath"),
+                        jni_sig!(() -> JString),
+                        &[],
+                    )?
+                    .l()?,
+                TakeStringMethod::FontName => env
+                    .call_method(
+                        activity,
+                        jni_str!("takeFontName"),
                         jni_sig!(() -> JString),
                         &[],
                     )?
@@ -122,7 +149,7 @@ mod android_file {
             if value.as_raw().is_null() {
                 return Ok(None);
             }
-            let jstr = unsafe { JString::from_raw(env, value.as_raw() as _) };
+            let jstr = env.cast_local::<JString>(value)?;
             Ok(Some(jstr.to_string()))
         })
     }
@@ -130,6 +157,8 @@ mod android_file {
     enum TakeStringMethod {
         OpenedFileName,
         FileError,
+        FontPath,
+        FontName,
     }
 
     fn take_opened_fd() -> Result<Option<File>, String> {
@@ -143,15 +172,10 @@ mod android_file {
     fn take_fd(opened: bool) -> Result<Option<File>, String> {
         let fd = with_activity(|env, activity| {
             if opened {
-                env.call_method(
-                    &activity,
-                    jni_str!("takeOpenedFd"),
-                    jni_sig!(() -> int),
-                    &[],
-                )?
-                .i()
+                env.call_method(activity, jni_str!("takeOpenedFd"), jni_sig!(() -> int), &[])?
+                    .i()
             } else {
-                env.call_method(&activity, jni_str!("takeSaveFd"), jni_sig!(() -> int), &[])?
+                env.call_method(activity, jni_str!("takeSaveFd"), jni_sig!(() -> int), &[])?
                     .i()
             }
         })?;
@@ -166,7 +190,7 @@ mod android_file {
     pub fn request_open() -> Result<(), String> {
         with_activity(|env, activity| {
             env.call_method(
-                &activity,
+                activity,
                 jni_str!("openRenjuFile"),
                 jni_sig!(() -> void),
                 &[],
@@ -179,7 +203,7 @@ mod android_file {
         with_activity(|env, activity| {
             let name = env.new_string(file_name)?;
             env.call_method(
-                &activity,
+                activity,
                 jni_str!("saveRenjuFile"),
                 jni_sig!((name: JString) -> void),
                 &[JValue::Object(&name)],
@@ -188,11 +212,48 @@ mod android_file {
         })
     }
 
+    pub fn request_open_font() -> Result<(), String> {
+        with_activity(|env, activity| {
+            env.call_method(
+                activity,
+                jni_str!("openFontFile"),
+                jni_sig!(() -> void),
+                &[],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn settings_path() -> Result<std::path::PathBuf, String> {
+        with_activity(|env, activity| {
+            let value = env
+                .call_method(
+                    activity,
+                    jni_str!("getSettingsPath"),
+                    jni_sig!(() -> JString),
+                    &[],
+                )?
+                .l()?;
+            let jstr = env.cast_local::<JString>(value)?;
+            Ok(std::path::PathBuf::from(jstr.to_string()))
+        })
+    }
+
+    pub fn take_font_selection() -> Result<Option<(String, String)>, String> {
+        let path = match call_take_string(TakeStringMethod::FontPath)? {
+            Some(path) => path,
+            None => return Ok(None),
+        };
+        let name = call_take_string(TakeStringMethod::FontName)?
+            .unwrap_or_else(|| "Selected font".to_string());
+        Ok(Some((path, name)))
+    }
+
     pub fn set_clipboard_text(text: &str) -> Result<(), String> {
         with_activity(|env, activity| {
             let text = env.new_string(text)?;
             env.call_method(
-                &activity,
+                activity,
                 jni_str!("setClipboardText"),
                 jni_sig!((text: JString) -> void),
                 &[JValue::Object(&text)],
@@ -205,7 +266,7 @@ mod android_file {
         with_activity(|env, activity| {
             let value = env
                 .call_method(
-                    &activity,
+                    activity,
                     jni_str!("getClipboardText"),
                     jni_sig!(() -> JString),
                     &[],
@@ -214,7 +275,7 @@ mod android_file {
             if value.as_raw().is_null() {
                 return Ok(None);
             }
-            let jstr = unsafe { JString::from_raw(env, value.as_raw() as _) };
+            let jstr = env.cast_local::<JString>(value)?;
             Ok(Some(jstr.to_string()))
         })
     }
@@ -222,7 +283,7 @@ mod android_file {
     pub fn safe_inset_top() -> Result<i32, String> {
         with_activity(|env, activity| {
             env.call_method(
-                &activity,
+                activity,
                 jni_str!("getSafeInsetTop"),
                 jni_sig!(() -> int),
                 &[],
@@ -529,7 +590,49 @@ pub fn setup_custom_fonts(ctx: &egui::Context, _path: &str) {
         }
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "android")]
+    {
+        let builtin = match _path {
+            "builtin:sc" => Some((
+                "font_sc",
+                include_bytes!("../Renjulibviewer_SC.ttf").as_slice(),
+            )),
+            "builtin:tc" => Some((
+                "font_tc",
+                include_bytes!("../Renjulibviewer_TC.ttf").as_slice(),
+            )),
+            "builtin:kr" => Some((
+                "font_kr",
+                include_bytes!("../Renjulibviewer_KR.ttf").as_slice(),
+            )),
+            "builtin:jp" => Some((
+                "font_jp",
+                include_bytes!("../Renjulibviewer_JP.ttf").as_slice(),
+            )),
+            _ => None,
+        };
+
+        let font_name = "android_selected_font".to_owned();
+        let font_data = builtin
+            .map(|(_, bytes)| egui::FontData::from_static(bytes))
+            .or_else(|| std::fs::read(_path).ok().map(egui::FontData::from_owned))
+            .unwrap_or_else(|| {
+                egui::FontData::from_static(include_bytes!("../Renjulibviewer_JP.ttf"))
+            });
+        fonts
+            .font_data
+            .insert(font_name.clone(), Arc::new(font_data));
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .insert(0, font_name.clone());
+        }
+        ctx.set_fonts(fonts);
+    }
+
+    #[cfg(target_os = "ios")]
     {
         let font_jp = include_bytes!("../Renjulibviewer_JP.ttf");
         let font_sc = include_bytes!("../Renjulibviewer_SC.ttf");
@@ -684,7 +787,7 @@ pub fn android_main(app: android_activity::AndroidApp) {
         ..Default::default()
     };
 
-    let _ = eframe::run_native(
+    let result = eframe::run_native(
         "Renjulibviewer",
         options,
         Box::new(|cc| {
@@ -693,6 +796,11 @@ pub fn android_main(app: android_activity::AndroidApp) {
             Ok(Box::new(RenjuApp::new_with_settings(settings)))
         }),
     );
+    android_file::clear();
+
+    if let Err(err) = result {
+        eprintln!("Android eframe startup/runtime failure: {err}");
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -936,6 +1044,8 @@ impl RenjuApp {
     /// 逶､髱｢縺ｨ繝・Μ繝ｼ繧貞ｮ悟・縺ｫ蛻晄悄蛹悶＠縲∵眠隕丈ｽ懈・迥ｶ諷九↓縺吶ｋ
     pub fn new_game(&mut self) {
         self.board = Board::new();
+        self.settings.free_placement = false;
+        self.settings.choose_start_player = false;
         self.lib_nodes = Some(vec![RenLibNode::new(
             -1, -1, NO_NODE, NO_NODE, NO_NODE, 0, 0,
         )]);
@@ -989,6 +1099,8 @@ impl RenjuApp {
             self.subtree_cache.borrow_mut().clear();
             self.current_node_idx = Some(0);
             self.board = Board::new();
+            self.settings.free_placement = false;
+            self.settings.choose_start_player = false;
             self.is_db_mode = is_db;
             self.load_time_sec = Some(start_time.elapsed().as_secs_f64());
 
@@ -1046,6 +1158,8 @@ impl RenjuApp {
             self.subtree_cache.borrow_mut().clear();
             self.current_node_idx = Some(0);
             self.board = Board::new();
+            self.settings.free_placement = false;
+            self.settings.choose_start_player = false;
             self.is_db_mode = is_db;
             self.load_time_sec = Some(start_time.elapsed().as_secs_f64());
 
@@ -1107,6 +1221,8 @@ impl RenjuApp {
             self.subtree_cache.borrow_mut().clear();
             self.current_node_idx = Some(0);
             self.board = Board::new();
+            self.settings.free_placement = false;
+            self.settings.choose_start_player = false;
             self.is_db_mode = is_db;
             self.load_time_sec = Some(start_time.elapsed().as_secs_f64());
 
@@ -1144,7 +1260,7 @@ impl RenjuApp {
     }
 
     #[cfg(target_os = "android")]
-    fn process_android_file_events(&mut self) {
+    fn process_android_file_events(&mut self, ctx: &egui::Context) {
         match android_file::take_error() {
             Ok(Some(err)) => self.vcf_status = format!("Android file operation failed: {err}"),
             Ok(None) => {}
@@ -1179,6 +1295,25 @@ impl RenjuApp {
             Ok(None) => {}
             Err(err) => self.vcf_status = format!("Android save result failed: {err}"),
         }
+
+        match android_file::take_font_selection() {
+            Ok(Some((path, name))) => {
+                self.settings.font_path = path.clone();
+                if !self
+                    .settings
+                    .available_fonts
+                    .iter()
+                    .any(|(existing, _)| existing == &path)
+                {
+                    self.settings.available_fonts.push((path.clone(), name));
+                }
+                setup_custom_fonts(ctx, &path);
+                self.settings.save();
+                ctx.request_repaint();
+            }
+            Ok(None) => {}
+            Err(err) => self.vcf_status = format!("Android font result failed: {err}"),
+        }
     }
 
     #[cfg(target_os = "ios")]
@@ -1198,6 +1333,9 @@ impl RenjuApp {
     }
 
     fn get_current_node(&self) -> Option<usize> {
+        if self.board.custom_position {
+            return None;
+        }
         if self.is_db_mode {
             let mut pb = HashBoard::new();
             for &m in &self.board.history {
@@ -1218,7 +1356,7 @@ impl RenjuApp {
 
     /// Reset board to root.
     fn reset_to_root(&mut self) {
-        if self.is_db_mode {
+        if self.board.custom_position || self.is_db_mode {
             self.board.undo_all();
         } else if let Some(nodes) = &self.lib_nodes {
             while let Some(idx) = self.current_node_idx {
@@ -1248,8 +1386,11 @@ impl RenjuApp {
 
     /// 謖・ｮ壹＆繧後◆蠎ｧ讓吶↓遏ｳ繧呈遠縺｡縲∝ｿ・ｦ√↓蠢懊§縺ｦ譁ｰ縺励＞繝弱・繝峨ｒ繝・Μ繝ｼ縺ｫ霑ｽ蜉縺吶ｋ
     fn play_move(&mut self, ux: usize, uy: usize) {
+        if self.settings.free_placement || self.settings.choose_start_player {
+            return;
+        }
         let before_len = self.board.history.len();
-        if self.is_db_mode {
+        if self.board.custom_position || self.is_db_mode {
             self.board.place_stone(ux, uy);
         } else if let Some(nodes) = &mut self.lib_nodes {
             if let Some(idx) = self.current_node_idx {
@@ -1381,9 +1522,12 @@ impl RenjuApp {
 
     /// 螻･豁ｴ縺ｾ縺溘・蜊倅ｸ縺ｮ蛻・ｲ舌↓蝓ｺ縺･縺・※荳謇矩ｲ繧√ｋ
     fn step_forward(&mut self) -> bool {
+        if self.settings.free_placement || self.settings.choose_start_player {
+            return false;
+        }
         if let Some(&next_pos) = self.board.future_history.last() {
             self.board.redo();
-            if !self.is_db_mode {
+            if !self.board.custom_position && !self.is_db_mode {
                 if let (Some(nodes), Some(idx)) = (&self.lib_nodes, self.current_node_idx) {
                     let mut c = nodes[idx].child;
                     while c != NO_NODE {
@@ -1398,6 +1542,10 @@ impl RenjuApp {
             }
             self.clear_vcf_solution();
             return true;
+        }
+
+        if self.board.custom_position {
+            return false;
         }
 
         // 2. 螻･豁ｴ縺檎┌縺上√°縺､逋ｻ骭ｲ縺輔ｌ縺ｦ縺・ｋ蛻・ｲ舌′1縺､縺縺代↑繧峨◎縺薙∈閾ｪ蜍慕噪縺ｫ騾ｲ繧
@@ -1692,6 +1840,7 @@ impl RenjuApp {
     }
 
     pub fn clear_vcf_solution(&mut self) {
+        self.forbidden_points_valid = false;
         #[cfg(not(target_arch = "wasm32"))]
         if self.vcf_solving {
             if let Some(cancel) = &self.vcf_cancel {
@@ -1751,10 +1900,31 @@ impl RenjuApp {
         board
     }
 
+    fn search_side_to_move(&self, board: &[u8; BOARD_CELLS]) -> Result<u8, String> {
+        if self.board.custom_position {
+            Ok(match self.board.next_player {
+                crate::board::Player::Black => BLACK,
+                crate::board::Player::White => crate::vcf::solver::WHITE,
+            })
+        } else {
+            side_to_move(board)
+        }
+    }
+
     pub fn cached_forbidden_points(&mut self) -> &[usize] {
         let board = self.current_vcf_board();
         if !self.forbidden_points_valid || self.forbidden_points_board != board {
-            self.forbidden_points = Solver::black_forbidden_points(board);
+            self.forbidden_points = if self.board.custom_position {
+                if self.settings.free_placement
+                    || self.board.next_player == crate::board::Player::Black
+                {
+                    Solver::black_forbidden_points_unchecked(board)
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Solver::black_forbidden_points(board)
+            };
             self.forbidden_points_board = board;
             self.forbidden_points_valid = true;
         }
@@ -1767,7 +1937,7 @@ impl RenjuApp {
         }
         let mode = search_mode_from_setting_for_vcf(self.settings.vcf_mode);
         let board = self.current_vcf_board();
-        let turn = match side_to_move(&board) {
+        let turn = match self.search_side_to_move(&board) {
             Ok(turn) => turn,
             Err(error) => {
                 self.vcf_status = error;
@@ -1875,7 +2045,7 @@ impl RenjuApp {
         // users configure only the shared depth and wall-clock bounds.
         let mode = SearchMode::Fast;
         let board = self.current_vcf_board();
-        let turn = match side_to_move(&board) {
+        let turn = match self.search_side_to_move(&board) {
             Ok(turn) => turn,
             Err(error) => {
                 self.vcf_status = error;
@@ -1992,7 +2162,7 @@ impl RenjuApp {
         }
         let mode = search_mode_from_setting_for_vcf(self.settings.vcf_mode);
         let board = self.current_vcf_board();
-        let turn = match side_to_move(&board) {
+        let turn = match self.search_side_to_move(&board) {
             Ok(turn) => turn,
             Err(error) => {
                 self.vcf_status = error;
@@ -2587,7 +2757,7 @@ impl eframe::App for RenjuApp {
         }
 
         #[cfg(target_os = "android")]
-        self.process_android_file_events();
+        self.process_android_file_events(ctx);
 
         let mut screenshot = None;
         for event in ctx.input(|i| i.events.clone()) {
@@ -2869,5 +3039,49 @@ impl Drop for RenjuApp {
     /// Save settings on shutdown.
     fn drop(&mut self) {
         self.settings.save();
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+    use crate::board::{Player, SIZE};
+
+    #[test]
+    fn free_stones_affect_forbidden_points_and_cache() {
+        // Avoid saving test settings through the application's Drop implementation.
+        let mut app =
+            std::mem::ManuallyDrop::new(RenjuApp::new_with_settings(setting::Settings::default()));
+        app.settings.free_placement = true;
+        app.board.begin_free_placement();
+        for (x, y) in [(6, 7), (8, 7), (7, 6), (7, 8)] {
+            app.board.toggle_setup_stone(x, y, Player::Black);
+        }
+        let center = 7 * SIZE + 7;
+        assert!(app.board.history.is_empty());
+        assert!(app.cached_forbidden_points().contains(&center));
+        app.board.toggle_setup_stone(9, 7, Player::White);
+        assert!(!app.cached_forbidden_points().contains(&center));
+        app.board.toggle_setup_stone(9, 7, Player::White);
+        assert!(app.cached_forbidden_points().contains(&center));
+        app.board.begin_sequence(Player::White);
+        app.settings.free_placement = false;
+        app.clear_vcf_solution();
+        assert!(app.cached_forbidden_points().is_empty());
+        assert_eq!(
+            app.search_side_to_move(&app.current_vcf_board()),
+            Ok(crate::vcf::solver::WHITE)
+        );
+        app.play_move(0, 0);
+        assert_eq!(app.board.grid[0], Some(Player::White));
+        assert_eq!(app.board.history, vec![0]);
+        assert!(app.cached_forbidden_points().contains(&center));
+        assert_eq!(app.settings.stone_number(1), Some(1));
+        assert_eq!(app.get_current_node(), None);
+        app.reset_to_root();
+        assert_eq!(app.board.grid, app.board.setup_grid);
+        assert!(app.step_forward());
+        assert_eq!(app.board.grid[0], Some(Player::White));
+        assert!(!app.step_forward());
     }
 }
