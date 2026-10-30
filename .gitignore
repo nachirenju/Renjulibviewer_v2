@@ -1,8 +1,40 @@
 # --- Rust ---
-/target/
+target/
 
 # --- Trunk (Wasm) ---
 /dist/
+coverage/
+test-results/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.log
+*.exe
+*.pdb
+*.dll
+*.so
+*.dylib
+*.wasm
+*.apk
+*.aab
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# --- Local test and benchmark files ---
+test/
+tests/
+testdata/
+fixtures/
+benches/
+benchmarks/
+*_test.rs
+*_tests.rs
+test_*.rs
+
+# --- Local analysis output ---
+/docs/vct-algorithm-analysis-*.md
 
 # --- Android / Gradle ---
 android/
@@ -18,9 +50,14 @@ local.properties
 ios/
 
 # --- IDEs / Editors ---
-/.agent/
-/.agents/
-/.codex/
+.agent/
+.agents/
+.codex/
+.claude/
+.cursor/
+.mcp.json
+AGENTS.md
+CLAUDE.md
 /.vscode/
 /.idea/
 /*.swp
@@ -49,3 +86,19 @@ Thumbs.db
 *.keystore
 key.properties
 service-account*.json
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sgf
+.aws/
+.ssh/
+.kube/
+.netrc
+.npmrc
+.pypirc
+id_rsa*
+id_ed25519*
+*.tfstate
+*.tfstate.*

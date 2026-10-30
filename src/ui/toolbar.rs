@@ -262,17 +262,28 @@ pub fn draw_toolbar(app: &mut crate::RenjuApp, ctx: &egui::Context, tr: &lang::T
             }
 
             ui.menu_button(egui::RichText::new("📷").size(btn_size), |ui| {
-                if ui.button("盤面全体を保存").clicked() {
+                if ui.button(tr.image_save_full).clicked() {
+                    app.copy_png_to_clipboard = false;
                     app.export_state = ExportState::RequestFull;
                     ui.close_menu();
                 }
-                if ui.button("範囲を指定して保存").clicked() {
+                if ui.button(tr.image_save_region).clicked() {
+                    app.copy_png_to_clipboard = false;
                     app.export_state = ExportState::SelectingRegion(None, None);
+                    ui.close_menu();
+                }
+                if ui.button(tr.image_copy_full).clicked() {
+                    #[cfg(target_arch = "wasm32")]
+                    if !crate::prepare_png_clipboard() {
+                        app.vcf_status = tr.image_copy_failed.to_string();
+                    }
+                    app.copy_png_to_clipboard = true;
+                    app.export_state = ExportState::RequestFull;
                     ui.close_menu();
                 }
             })
             .response
-            .on_hover_text("画像として保存");
+            .on_hover_text(tr.image_export_tooltip);
 
             if ui
                 .button(egui::RichText::new("🎬").size(btn_size))

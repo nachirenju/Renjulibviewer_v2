@@ -128,6 +128,7 @@ pub fn draw_main_board(app: &mut crate::RenjuApp, ctx: &egui::Context, ui: &mut 
         current_history,
         is_gif_capturing,
     );
+    crate::ui::board::draw_ad_hoc_labels(app, &painter, rect, cell_size);
 
     let branch_points = if app.settings.show_branches && !is_gif_capturing {
         crate::ui::board::draw_branches(
@@ -407,16 +408,39 @@ pub fn handle_board_input(
     if app.settings.choose_start_player {
         return;
     }
+    let text_shortcut =
+        response.hovered() && ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
     if app.settings.free_placement {
         if !is_selecting_region && !is_gif_capturing {
-            let player = if response.secondary_clicked() {
+            let wants_text = text_shortcut
+                || (response.clicked_by(egui::PointerButton::Primary)
+                    && (ctx.input(|i| i.modifiers.ctrl) || app.is_text_mode));
+            let player = if wants_text {
+                None
+            } else if response.secondary_clicked() {
                 Some(Player::White)
             } else if response.clicked_by(egui::PointerButton::Primary) {
                 Some(Player::Black)
             } else {
                 None
             };
-            if let (Some(player), Some(pos)) = (player, response.interact_pointer_pos()) {
+            let pointer_pos = if text_shortcut {
+                ctx.input(|i| i.pointer.hover_pos())
+            } else {
+                response.interact_pointer_pos()
+            };
+            if wants_text {
+                if let Some(pos) = pointer_pos {
+                    let gx = ((pos.x - (rect.left() + cell_size)) / cell_size + 0.5).floor() as i32;
+                    let gy = ((pos.y - (rect.top() + cell_size)) / cell_size + 0.5).floor() as i32;
+                    if (0..SIZE as i32).contains(&gx) && (0..SIZE as i32).contains(&gy) {
+                        let coord = (gx as i8, gy as i8);
+                        app.editing_coord = Some(coord);
+                        app.editing_text =
+                            app.ad_hoc_labels.get(&coord).cloned().unwrap_or_default();
+                    }
+                }
+            } else if let (Some(player), Some(pos)) = (player, pointer_pos) {
                 let gx = ((pos.x - (rect.left() + cell_size)) / cell_size + 0.5).floor() as i32;
                 let gy = ((pos.y - (rect.top() + cell_size)) / cell_size + 0.5).floor() as i32;
                 if (0..SIZE as i32).contains(&gx) && (0..SIZE as i32).contains(&gy) {
@@ -431,13 +455,19 @@ pub fn handle_board_input(
     if !is_selecting_region
         && !is_gif_capturing
         && (response.clicked()
-            || (response.drag_stopped() && response.dragged_by(egui::PointerButton::Primary)))
+            || (response.drag_stopped() && response.dragged_by(egui::PointerButton::Primary))
+            || text_shortcut)
     {
-        if let Some(pos) = response.interact_pointer_pos() {
+        let pointer_pos = if text_shortcut {
+            ctx.input(|i| i.pointer.hover_pos())
+        } else {
+            response.interact_pointer_pos()
+        };
+        if let Some(pos) = pointer_pos {
             let gx = ((pos.x - (rect.left() + cell_size)) / cell_size + 0.5).floor() as i32;
             let gy = ((pos.y - (rect.top() + cell_size)) / cell_size + 0.5).floor() as i32;
             if gx >= 0 && gx < 15 && gy >= 0 && gy < 15 {
-                if ctx.input(|i| i.modifiers.ctrl) || app.is_text_mode {
+                if text_shortcut || ctx.input(|i| i.modifiers.ctrl) || app.is_text_mode {
                     app.editing_coord = Some((gx as i8, gy as i8));
                     app.editing_text = String::new();
 
@@ -537,7 +567,14 @@ pub fn draw_grid_and_coords(
             egui::Color32::BLACK,
         );
     }
+}
 
+pub fn draw_ad_hoc_labels(
+    app: &crate::RenjuApp,
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    cell_size: f32,
+) {
     let font_id = egui::FontId::proportional(cell_size * 0.4);
     for (&(lx, ly), text) in &app.ad_hoc_labels {
         let center = egui::pos2(

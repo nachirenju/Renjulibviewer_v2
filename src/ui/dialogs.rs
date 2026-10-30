@@ -335,13 +335,15 @@ pub fn draw_copy_notification(app: &mut crate::RenjuApp, ctx: &egui::Context) {
 
 pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
     if let Some(coord) = app.editing_coord {
-        egui::Window::new("Text Edit")
+        let tr = app.settings.tr();
+        egui::Window::new(tr.text_edit_title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 ui.label(format!(
-                    "Coordinate: {}{}",
+                    "{}: {}{}",
+                    tr.coordinate,
                     (b'A' + coord.0 as u8) as char,
                     15 - coord.1
                 ));
@@ -367,6 +369,11 @@ pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
 
                 ui.horizontal(|ui| {
                     if ui.button("OK").clicked() || enter_pressed {
+                        if app.board.custom_position {
+                            app.set_ad_hoc_label(coord, app.editing_text.clone());
+                            app.editing_coord = None;
+                            return;
+                        }
                         let new_hash = {
                             let mut pb = HashBoard::new();
                             for &m in &app.board.history {
@@ -435,7 +442,7 @@ pub fn draw_text_edit_dialog(app: &mut crate::RenjuApp, ctx: &egui::Context) {
                         app.editing_coord = None;
                     }
 
-                    if ui.button("Cancel").clicked()
+                    if ui.button(tr.cancel).clicked()
                         || (ui.input(|i| i.key_pressed(egui::Key::Escape)))
                     {
                         app.editing_coord = None;

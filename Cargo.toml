@@ -39,6 +39,7 @@ web-time = "1.1"
 memmap2 = "0.9"
 pollster = "0.3"
 rayon = "1.10"
+arboard = "3.6"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 rand = "0.8"

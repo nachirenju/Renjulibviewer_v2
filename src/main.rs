@@ -63,7 +63,7 @@ mod android_file {
     use android_activity::AndroidApp;
     use jni::{
         JavaVM, jni_sig, jni_str,
-        objects::{JObject, JString, JValue},
+        objects::{JByteArray, JObject, JString, JValue},
         refs::Global,
     };
     use std::{
@@ -262,6 +262,19 @@ mod android_file {
         })
     }
 
+    pub fn set_clipboard_png(png: &[u8]) -> Result<(), String> {
+        with_activity(|env, activity| {
+            let png = env.byte_array_from_slice(png)?;
+            env.call_method(
+                activity,
+                jni_str!("setClipboardPng"),
+                jni_sig!((png: JByteArray) -> void),
+                &[JValue::Object(&png)],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn get_clipboard_text() -> Result<Option<String>, String> {
         with_activity(|env, activity| {
             let value = env
@@ -332,6 +345,48 @@ export function postVcfWorkerProgress(message) {
     if (globalThis.__RENJU_VCF_WORKER === true && typeof self !== "undefined") {
         self.postMessage(message);
     }
+}
+
+let pendingPngClipboard = null;
+
+export function preparePngClipboard() {
+    if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
+        return false;
+    }
+    try {
+        let resolveBlob;
+        let rejectBlob;
+        const blobPromise = new Promise((resolve, reject) => {
+            resolveBlob = resolve;
+            rejectBlob = reject;
+        });
+        pendingPngClipboard = {
+            resolveBlob,
+            rejectBlob,
+            writePromise: navigator.clipboard.write([
+                new ClipboardItem({ "image/png": blobPromise })
+            ])
+        };
+        return true;
+    } catch (error) {
+        console.error("Could not prepare image clipboard copy", error);
+        pendingPngClipboard = null;
+        return false;
+    }
+}
+
+export function copyPngToClipboard(pngBytes) {
+    const blob = new Blob([pngBytes], { type: "image/png" });
+    if (pendingPngClipboard) {
+        const pending = pendingPngClipboard;
+        pendingPngClipboard = null;
+        pending.resolveBlob(blob);
+        return pending.writePromise;
+    }
+    if (!navigator.clipboard || typeof ClipboardItem === "undefined") {
+        return Promise.reject(new Error("Image clipboard is not supported by this browser"));
+    }
+    return navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
 }
 
 function findTrunkAsset(selector, fallbackPattern, predicate = () => true) {
@@ -422,6 +477,10 @@ extern "C" {
     fn is_vcf_worker_context() -> bool;
     #[wasm_bindgen(js_name = postVcfWorkerProgress)]
     fn post_vcf_worker_progress(message: &str);
+    #[wasm_bindgen(js_name = preparePngClipboard)]
+    pub(crate) fn prepare_png_clipboard() -> bool;
+    #[wasm_bindgen(js_name = copyPngToClipboard)]
+    fn copy_png_to_clipboard(png: &js_sys::Uint8Array) -> js_sys::Promise;
 
     #[wasm_bindgen(catch, js_name = spawnVcfWorker)]
     fn spawn_vcf_worker(
@@ -927,6 +986,14 @@ pub struct RenjuApp {
     pub subtree_cache: std::cell::RefCell<FxHashMap<usize, usize>>,
     pub is_text_mode: bool,
     pub export_state: ExportState,
+    /// Whether the next PNG screenshot should be copied instead of saved.
+    pub copy_png_to_clipboard: bool,
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        not(target_os = "android"),
+        not(target_os = "ios")
+    ))]
+    pub image_clipboard: Option<arboard::Clipboard>,
     pub gif_settings: GifSettings,
     pub show_gif_setup: bool,
     pub gif_frames: Vec<image::RgbaImage>,
@@ -965,6 +1032,8 @@ pub struct RenjuApp {
     pub vcf_worker_result: Arc<Mutex<Option<String>>>,
     #[cfg(target_arch = "wasm32")]
     pub wasm_dropped_file: Arc<Mutex<Option<(String, Vec<u8>)>>>,
+    #[cfg(target_arch = "wasm32")]
+    pub image_clipboard_result: Arc<Mutex<Option<Result<(), String>>>>,
     #[cfg(target_os = "android")]
     pub android_pending_save: Option<(Vec<u8>, bool, String)>,
 }
@@ -1001,6 +1070,13 @@ impl RenjuApp {
             subtree_cache: std::cell::RefCell::new(FxHashMap::default()),
             is_text_mode: false,
             export_state: ExportState::Idle,
+            copy_png_to_clipboard: false,
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                not(target_os = "android"),
+                not(target_os = "ios")
+            ))]
+            image_clipboard: None,
             gif_settings: GifSettings::default(),
             show_gif_setup: false,
             gif_frames: Vec::new(),
@@ -1036,6 +1112,8 @@ impl RenjuApp {
             vcf_worker_result: Arc::new(Mutex::new(None)),
             #[cfg(target_arch = "wasm32")]
             wasm_dropped_file: Arc::new(Mutex::new(None)),
+            #[cfg(target_arch = "wasm32")]
+            image_clipboard_result: Arc::new(Mutex::new(None)),
             #[cfg(target_os = "android")]
             android_pending_save: None,
         }
@@ -1803,6 +1881,15 @@ impl RenjuApp {
         }
 
         self.trigger_copy_notification();
+    }
+
+    /// Store a board-only label without creating or changing a library branch.
+    pub fn set_ad_hoc_label(&mut self, coord: (i8, i8), text: String) {
+        if text.is_empty() {
+            self.ad_hoc_labels.remove(&coord);
+        } else {
+            self.ad_hoc_labels.insert(coord, text);
+        }
     }
 
     pub fn paste_text_from_clipboard(&mut self, _ctx: &egui::Context) -> Option<String> {
@@ -2754,6 +2841,20 @@ impl eframe::App for RenjuApp {
                 let is_db = file_name.ends_with(".db");
                 self.process_loaded_data(&data, file_name, is_db);
             }
+            let clipboard_result = self
+                .image_clipboard_result
+                .lock()
+                .ok()
+                .and_then(|mut result| result.take());
+            if let Some(result) = clipboard_result {
+                match result {
+                    Ok(()) => self.trigger_copy_notification(),
+                    Err(err) => {
+                        self.vcf_status =
+                            format!("{}: {err}", self.settings.tr().image_copy_failed);
+                    }
+                }
+            }
         }
 
         #[cfg(target_os = "android")]
@@ -2812,13 +2913,43 @@ impl eframe::App for RenjuApp {
                     {
                         if is_png {
                             self.export_state = ExportState::Idle;
+                            let copy_to_clipboard = std::mem::take(&mut self.copy_png_to_clipboard);
                             #[cfg(all(
                                 not(target_arch = "wasm32"),
                                 not(target_os = "android"),
                                 not(target_os = "ios")
                             ))]
                             {
-                                if let Some(path) = rfd::FileDialog::new()
+                                if copy_to_clipboard {
+                                    let result = (|| -> Result<(), String> {
+                                        if self.image_clipboard.is_none() {
+                                            self.image_clipboard = Some(
+                                                arboard::Clipboard::new()
+                                                    .map_err(|err| err.to_string())?,
+                                            );
+                                        }
+                                        self.image_clipboard
+                                            .as_mut()
+                                            .expect("clipboard was initialized")
+                                            .set_image(arboard::ImageData {
+                                                width,
+                                                height,
+                                                bytes: std::borrow::Cow::Owned(
+                                                    img_buf.as_raw().clone(),
+                                                ),
+                                            })
+                                            .map_err(|err| err.to_string())
+                                    })();
+                                    match result {
+                                        Ok(()) => self.trigger_copy_notification(),
+                                        Err(err) => {
+                                            self.vcf_status = format!(
+                                                "{}: {err}",
+                                                self.settings.tr().image_copy_failed
+                                            );
+                                        }
+                                    }
+                                } else if let Some(path) = rfd::FileDialog::new()
                                     .add_filter("PNG Image", &["png"])
                                     .set_file_name("renju_board.png")
                                     .save_file()
@@ -2828,9 +2959,27 @@ impl eframe::App for RenjuApp {
                             }
                             #[cfg(target_os = "android")]
                             {
-                                self.vcf_status =
-                                    "Android native image export is not implemented yet"
-                                        .to_string();
+                                if copy_to_clipboard {
+                                    let mut png_data = Vec::new();
+                                    let mut cursor = std::io::Cursor::new(&mut png_data);
+                                    let result = img_buf
+                                        .write_to(&mut cursor, image::ImageOutputFormat::Png)
+                                        .map_err(|err| err.to_string())
+                                        .and_then(|_| android_file::set_clipboard_png(&png_data));
+                                    match result {
+                                        Ok(()) => self.trigger_copy_notification(),
+                                        Err(err) => {
+                                            self.vcf_status = format!(
+                                                "{}: {err}",
+                                                self.settings.tr().image_copy_failed
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    self.vcf_status =
+                                        "Android native image export is not implemented yet"
+                                            .to_string();
+                                }
                             }
                             #[cfg(target_os = "ios")]
                             {
@@ -2845,16 +2994,34 @@ impl eframe::App for RenjuApp {
                                     .write_to(&mut cursor, image::ImageOutputFormat::Png)
                                     .is_ok()
                                 {
-                                    wasm_bindgen_futures::spawn_local(async move {
-                                        if let Some(handle) = rfd::AsyncFileDialog::new()
-                                            .add_filter("PNG Image", &["png"])
-                                            .set_file_name("renju_board.png")
-                                            .save_file()
-                                            .await
-                                        {
-                                            let _ = handle.write(&png_data).await;
-                                        }
-                                    });
+                                    if copy_to_clipboard {
+                                        let bytes = js_sys::Uint8Array::from(png_data.as_slice());
+                                        let promise = copy_png_to_clipboard(&bytes);
+                                        let result_state = self.image_clipboard_result.clone();
+                                        let repaint_ctx = ctx.clone();
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            let result =
+                                                wasm_bindgen_futures::JsFuture::from(promise)
+                                                    .await
+                                                    .map(|_| ())
+                                                    .map_err(|err| format!("{err:?}"));
+                                            if let Ok(mut pending) = result_state.lock() {
+                                                *pending = Some(result);
+                                            }
+                                            repaint_ctx.request_repaint();
+                                        });
+                                    } else {
+                                        wasm_bindgen_futures::spawn_local(async move {
+                                            if let Some(handle) = rfd::AsyncFileDialog::new()
+                                                .add_filter("PNG Image", &["png"])
+                                                .set_file_name("renju_board.png")
+                                                .save_file()
+                                                .await
+                                            {
+                                                let _ = handle.write(&png_data).await;
+                                            }
+                                        });
+                                    }
                                 }
                             }
                         } else if is_gif {

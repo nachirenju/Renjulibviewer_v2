@@ -63,6 +63,13 @@ pub struct Tr {
     pub undo_one_tooltip: &'static str,
     pub redo_one_tooltip: &'static str,
     pub redo_all_tooltip: &'static str,
+    pub text_edit_title: &'static str,
+    pub coordinate: &'static str,
+    pub image_save_full: &'static str,
+    pub image_save_region: &'static str,
+    pub image_copy_full: &'static str,
+    pub image_export_tooltip: &'static str,
+    pub image_copy_failed: &'static str,
 
     // --- 設定ウィンドウ ---
     pub settings_title: &'static str,
@@ -144,6 +151,13 @@ pub fn get(lang: Language) -> &'static Tr {
 }
 
 static TR_JA: Tr = Tr {
+    text_edit_title: "盤面文字入力",
+    coordinate: "座標",
+    image_save_full: "盤面全体を保存",
+    image_save_region: "範囲を指定して保存",
+    image_copy_full: "現在の盤面をクリップボードにコピー",
+    image_export_tooltip: "盤面画像の保存・コピー",
+    image_copy_failed: "画像のクリップボードへのコピーに失敗しました",
     input_mode: "入力モード",
     normal_input_mode: "通常手順入力",
     free_placement_mode: "自由石配置",
@@ -238,6 +252,13 @@ static TR_JA: Tr = Tr {
 };
 
 static TR_EN: Tr = Tr {
+    text_edit_title: "Board Text",
+    coordinate: "Coordinate",
+    image_save_full: "Save entire board",
+    image_save_region: "Save selected area",
+    image_copy_full: "Copy current board to clipboard",
+    image_export_tooltip: "Save or copy board image",
+    image_copy_failed: "Failed to copy image to clipboard",
     input_mode: "Input mode",
     normal_input_mode: "Normal move sequence",
     free_placement_mode: "Free stone placement",
@@ -332,6 +353,13 @@ static TR_EN: Tr = Tr {
 };
 
 static TR_ZH: Tr = Tr {
+    text_edit_title: "棋盘文字输入",
+    coordinate: "坐标",
+    image_save_full: "保存整个棋盘",
+    image_save_region: "保存所选区域",
+    image_copy_full: "将当前棋盘复制到剪贴板",
+    image_export_tooltip: "保存或复制棋盘图像",
+    image_copy_failed: "无法将图像复制到剪贴板",
     input_mode: "输入模式",
     normal_input_mode: "正常手顺输入",
     free_placement_mode: "自由摆子",
@@ -426,6 +454,13 @@ static TR_ZH: Tr = Tr {
 };
 
 static TR_ZHT: Tr = Tr {
+    text_edit_title: "棋盤文字輸入",
+    coordinate: "座標",
+    image_save_full: "儲存整個棋盤",
+    image_save_region: "儲存所選區域",
+    image_copy_full: "將目前棋盤複製到剪貼簿",
+    image_export_tooltip: "儲存或複製棋盤圖像",
+    image_copy_failed: "無法將圖像複製到剪貼簿",
     input_mode: "輸入模式",
     normal_input_mode: "正常手順輸入",
     free_placement_mode: "自由擺子",
@@ -520,6 +555,13 @@ static TR_ZHT: Tr = Tr {
 };
 
 static TR_KO: Tr = Tr {
+    text_edit_title: "바둑판 문자 입력",
+    coordinate: "좌표",
+    image_save_full: "전체 바둑판 저장",
+    image_save_region: "선택 영역 저장",
+    image_copy_full: "현재 바둑판을 클립보드에 복사",
+    image_export_tooltip: "바둑판 이미지 저장 또는 복사",
+    image_copy_failed: "이미지를 클립보드에 복사하지 못했습니다",
     input_mode: "입력 모드",
     normal_input_mode: "일반 수순 입력",
     free_placement_mode: "자유 돌 배치",
